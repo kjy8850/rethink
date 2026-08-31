@@ -196,13 +196,5 @@ export type ClimateComponent = ComponentInfo & {
     fan_modes?: string[]
     swing_modes?: string[]
     swing_horizontal_modes?: string[]
-}
-
-export type HumidifierComponent = ComponentInfo & {
-    platform: 'humidifier'
-    device_class?: 'dehumidifier' | 'humidifier'
-    modes?: string[]
-    min_humidity?: number
-    max_humidity?: number
     current_humidity_topic?: string
 }
