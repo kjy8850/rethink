@@ -19,6 +19,7 @@ import RV13U6AM8W_D_US_WIFI from './devices/RV13U6AM8W_D_US_WIFI'
 import F3L2CYU__ from './devices/F3L2CYU__'
 import RV13B6BSD_D_US_WIFI from './devices/RV13B6BSD_D_US_WIFI'
 import WTL_FXU_BDV_NA_01 from './devices/WTL_FXU_BDV_NA_01'
+import DHUM_056905_WW from './devices/DHUM_056905_WW'
 import { FAKPK21021, BDH_D39301_KR } from './devices/washtower'
 import { Device as T1Device } from './thinq1/device'
 import { Device as T2Device } from './thinq2/device'
@@ -61,6 +62,7 @@ const t2deviceTypes: Record<string, T2Factory> = {
     WTL_FXU_BDV_NA_01, // LG WashTower
     FAKPK21021, // LG WashTower washer (deviceType 221)
     BDH_D39301_KR, // LG WashTower dryer (deviceType 222)
+    DHUM_056905_WW,
 }
 
 class Bridge {
