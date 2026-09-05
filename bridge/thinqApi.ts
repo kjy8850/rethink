@@ -229,7 +229,15 @@ export class Client {
         })
     }
 
-    // setting initDevice to true allows the device to be removed from the current account, but it triggers a failure if the device is not currently registered
+    // NOTE: initDevice=true used to be retried here on "already registered" errors, but that flag
+    // tells LG's backend it's OK to rip the device out of its current account registration and
+    // create a brand new one. In practice that meant: existing entry deleted from the official
+    // app/Google Home, a new "Rethink xxxxxxxx" device created in its place, and the device's
+    // registration re-bound to rethink's credentials -- so it could no longer re-pair with LG's
+    // real cloud afterwards. The certificate rethink needs for bridging is already issued during
+    // pair(), before addDevice() is ever called, so nothing is gained by forcing a re-registration.
+    // We now treat "already registered" as success (device stays registered exactly as it was,
+    // under its existing alias) instead of retrying with initDevice=true.
     // ciphertext is required for Thinq2 devices
     async addDevice(device: Device, alias: string, deviceType: string, ciphertext?: Buffer) {
         if (!this.homeId) throw new Error('Current home is not set')
@@ -254,13 +262,16 @@ export class Client {
             })
         } catch (err) {
             if (err instanceof RemoteError && err.resultCode === ErrorCodes.ERROR_ALREADY_DEVICES_REGISTERED_IN_HOME) {
-                console.log('Device already registered, retrying with initDevice=true')
-                body.initDevice = true
-                await apiFetch(`${thinq2Uri}/service/homes/${this.homeId}/devices`, {
-                    headers: this.headers,
-                    method: 'POST',
-                    body: JSON.stringify(body),
-                })
+                let existingAlias: string | undefined
+                try {
+                    const home = await this.listDevices()
+                    existingAlias = home.find((d) => d.deviceId === device.deviceId)?.alias
+                } catch {
+                    // best-effort only; missing the alias for the log line isn't fatal
+                }
+                console.log(
+                    `Device already registered in home, keeping existing registration as-is (alias: ${existingAlias ?? 'unknown'})`,
+                )
             } else {
                 throw err
             }
