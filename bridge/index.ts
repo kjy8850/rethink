@@ -110,6 +110,29 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
      */
     deviceNames = new Map<string, string>()
 
+    /*
+     * 2026-09-05 사고 복구용 오버라이드
+     *
+     * bridge 모드를 4대 전부 켰을 때 registrationPlan이 LG 계정에서 기존 등록을 삭제하고
+     * 하드코딩된 "Rethink xxxxxxxx" 이름으로 재등록해버려, LG 공식 앱과 계정 alias가 모두
+     * 이 이름으로 덮어써졌다. 계정 alias 자체가 이미 오염되어 deviceNames로는 복구가 안 되므로,
+     * HA 쪽에 남아있던 원래 이름을 device_id별로 하드코딩해 강제 복구한다.
+     * 다른 기기나 향후 신규 기기에는 영향 없음(이 맵에 없는 id는 기존 로직 그대로 동작).
+     */
+    static readonly incidentAliasOverrides = new Map<string, string>([
+        ['ab4efd03-79fc-14a3-a2cf-1c392976c686', '창고에어컨'],
+        ['d5d9e732-4383-1b37-a909-1c392976f206', '컴퓨터에어컨'],
+        ['bf24473f-86f1-1379-8458-1c3929783445', '거실에어컨'],
+        ['62eb33bb-08f7-185d-bb02-1c392976c69d', '안방에어컨'],
+    ])
+
+    /*
+     * addDevice에 넘길 alias를 결정한다: 사고 복구용 오버라이드 > 계정에 남아있는 alias > 폴백.
+     */
+    resolveAlias(id: string) {
+        return Bridge.incidentAliasOverrides.get(id) ?? this.deviceNames.get(id) ?? `Rethink ${id.substring(0, 8)}`
+    }
+
     constructor(
         readonly state: BridgeState,
         readonly manager: DeviceManager,
@@ -288,7 +311,7 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
             clientDevice = new Thinq1Device(device.id, device.meta, state)
             statusCallback('Adding device to home')
 
-            await client.addDevice(clientDevice, `Rethink ${device.id.substring(0, 8)}`, deviceType)
+            await client.addDevice(clientDevice, this.resolveAlias(device.id), deviceType)
         } else if (device.platform === 'thinq2') {
             statusCallback('Fetching otp key')
             const otp = await client.prepareNewT2Device()
@@ -306,7 +329,7 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
             }
 
             statusCallback('Adding device to home')
-            await client.addDevice(clientDevice, `Rethink ${device.id.substring(0, 8)}`, deviceType, ciphertext)
+            await client.addDevice(clientDevice, this.resolveAlias(device.id), deviceType, ciphertext)
         } else {
             throw new Error('Unknown device platform')
         }
