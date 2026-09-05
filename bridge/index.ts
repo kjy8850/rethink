@@ -296,8 +296,24 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
 
         if (!deviceType) throw new Error('Device type must be specified')
 
-        statusCallback('Removing device from home')
-        await client.removeDevice(device.id)
+        /*
+         * Only an appliance the home does not already hold is removed first. Deleting and re-adding
+         * one that is already registered announces the removal to every app on the account and
+         * leaves nothing behind if the re-add is refused -- which is what a WashTower pair does,
+         * since the cloud links washer and dryer as one 1+1 group and rejects the second add with
+         * '0005'. Bridging needs the credentials from pair(), not a fresh registration.
+         * Ported from upstream PR #107 (anszom/rethink#107).
+         */
+        const homeDevices = await client.listDevices()
+        const registered = homeDevices.find((dev) => dev.deviceId === device.id)
+
+        if (registered) {
+            statusCallback('Keeping existing registration')
+            console.log(`Device ${device.id} already registered as "${registered.alias}", not removing`)
+        } else {
+            statusCallback('Removing device from home')
+            await client.removeDevice(device.id)
+        }
 
         let clientDevice: Thinq1Device | Thinq2Device
 
