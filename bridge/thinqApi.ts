@@ -261,6 +261,18 @@ export class Client {
                 body: JSON.stringify(body),
             })
         } catch (err) {
+            // WashTower (washer+dryer) is treated by LG's cloud as a paired 1+1 device group:
+            // registering the washer auto-links the dryer server-side, so a subsequent addDevice
+            // for the dryer gets rejected with resultCode '0005' (undocumented -- not in
+            // ErrorCodes -- but confirmed via community report, see
+            // https://github.com/anszom/rethink/issues/79#issuecomment-5299814720). This is
+            // expected/benign for WashTower pairs -- the group registration already succeeded
+            // when the first unit was added -- so treat it the same as "already registered"
+            // rather than throwing.
+            if (err instanceof RemoteError && err.resultCode === '0005') {
+                console.log('WashTower dual-registration detected (0005). Ignoring error to maintain bridge.')
+                return
+            }
             if (err instanceof RemoteError && err.resultCode === ErrorCodes.ERROR_ALREADY_DEVICES_REGISTERED_IN_HOME) {
                 let existingAlias: string | undefined
                 try {
