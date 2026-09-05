@@ -77,6 +77,17 @@ const t2deviceTypes: Record<string, T2Factory> = {
     WTL_FXU_BDV_NA_01, // LG WashTower
     FAKPK21021, // LG WashTower washer (deviceType 221)
     BDH_D39301_KR, // LG WashTower dryer (deviceType 222)
+    // Real-world unit reports modelName "BDH_D39302_KR" (302, not 301) -- observed live via
+    // rethink logs 2026-09-05, deviceType 222, same modemType (RTK_RTL8720cm), same countryCode
+    // (KR). UNVERIFIED alias: assumed protocol-compatible with BDH_D39301_KR pending real field
+    // confirmation (the codebase has precedent for firmware-revision model strings differing by
+    // a trailing digit while sharing a handler -- see RAC_056905_WW/RAC_0B0001_WW above -- but
+    // also precedent for such units needing their OWN handler due to subtle differences -- see
+    // RV13B6BSD_D_US_WIFI/RV13B6ES_D_US_WIFI above). Registering this alias primarily to stop
+    // the device falling through as "unknown model" during provisioning, which correlates with
+    // an observed device_packet parse crash loop (resetDetails.reason=SOFTWARE,
+    // caller=parse_mtom_pack) on the physical unit.
+    ['BDH_D39302_KR']: BDH_D39301_KR,
     DHUM_056905_WW,
     ST_B_E4H01Y_APL,
 }
