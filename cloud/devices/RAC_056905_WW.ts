@@ -756,6 +756,47 @@ export default class Device extends TLVDevice {
             }
         }
 
+        /*
+         * Units that advertise mFilter (caps 0x2f1 bit 0) never answer the private filter query
+         * above, so filterLifeTime stays zero and the block above is skipped. They do report the
+         * same information as plain TLV tags in every values response: 0x355 is the remaining
+         * filter time and 0x356 its rated life, both in hours. Verified on four CST_570004_WW
+         * cassettes by comparing 0x355 against the figure the ThinQ cloud showed for the same
+         * unit (2377/2284 matched exactly; the two units that had been running differed by the
+         * 1-2 h they had accumulated between the two readings).
+         *
+         * There is no reset command here: the private-command reset path needs the filter data
+         * this unit does not serve, and nothing in the TLV stream has been shown to reset it.
+         */
+        if (!this.filterLifeTime && this.hasTag(0x355)) {
+            const filterRemaining = {
+                platform: 'sensor',
+                unique_id: '$deviceid-filterremaining',
+                name: 'Filter remaining time',
+                icon: 'mdi:air-filter',
+                device_class: 'duration',
+                unit_of_measurement: 'h',
+                state_class: 'measurement',
+                entity_category: 'diagnostic',
+            }
+            config['components']['filterremaining'] = filterRemaining
+            this.addField(config, { id: 0x355, name: '', comp: 'filterremaining', writable: false })
+
+            if (this.hasTag(0x356)) {
+                const filterLife = {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-filterlife',
+                    name: 'Filter life time',
+                    icon: 'mdi:air-filter',
+                    device_class: 'duration',
+                    unit_of_measurement: 'h',
+                    entity_category: 'diagnostic',
+                }
+                config['components']['filterlife'] = filterLife
+                this.addField(config, { id: 0x356, name: '', comp: 'filterlife', writable: false })
+            }
+        }
+
         // this value is reported as zero by multi-split units
         if (this.raw_clip_state[0x2b3]) {
             const energyCurrent = {

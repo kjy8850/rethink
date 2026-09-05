@@ -197,3 +197,59 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 })
+
+// Real packet captures from a CST_570004_WW ceiling cassette. These units advertise mFilter
+// (caps 0x2F1 bit 0), so they never answer the private filter query and filterLifeTime stays
+// zero -- but they do stream the filter data as ordinary TLV tags 0x355/0x356 in every values
+// response. 0x355 = 2284 h here, which is exactly what the ThinQ cloud reported for this unit.
+const CST_META: Metadata = { modelId: 'CST_570004_WW', modelName: 'CST_570004_WW', swVersion: '570004' }
+
+const CST_CAPS_RESPONSE_HEX =
+    '000004000000A702010070' +
+    'B00AB04FB0A001D5B0C1B103B4D011B710FEBB81BBC0BC41BC9088BCC1B35035B381B540B2E01006' +
+    'B75020B85020B8903CB8D020B9103CB1C1BD41B5C0B642B61036B5C1B642B61036B5C2B642B61036' +
+    'B5C3B642B603B69037B6F0570004E5E0030DE5E04163D400BD30800000DD1028' +
+    '82A3'
+
+const CST_QUERY_RESPONSE_HEX =
+    '000004000000A70204004D' +
+    '7DC07E407E827F50337F90367F0086808840D4C0D500C860222281418181C9408340838183C08FC0' +
+    'CD40CD00CCC0CDA00226D56008ECD5A00960BC9088D5D03CD61020C9009C4087CBAC40E9C1' +
+    'D368'
+
+describe('CST_570004_WW (mFilter cassette)', () => {
+    test('filter sensors come from TLV 0x355/0x356, not the private filter query', (t) => {
+        enableMockTimers(t)
+        const ha = new MockHAConnection()
+        const thinq = new MockThinq2Device(DEVICE_ID, CST_META)
+        const dev = new DUT(ha.asConnection(), thinq, CST_META)
+        thinq.resetRecorder()
+
+        thinq.emit('data', buf(CST_CAPS_RESPONSE_HEX))
+        thinq.emit('data', buf(CST_QUERY_RESPONSE_HEX))
+        tickMockTimers(t, 6000)
+
+        const device = ha.devices[DEVICE_ID]
+        assert.ok(device, 'HA configuration published')
+        const components = device.config!.components as Record<string, Record<string, unknown>>
+
+        assert.ok(components.filterremaining, 'filterremaining sensor (TLV 0x355 present)')
+        assert.equal(components.filterremaining.unit_of_measurement, 'h')
+        assert.equal(components.filterremaining.device_class, 'duration')
+        assert.ok(components.filterlife, 'filterlife sensor (TLV 0x356 present)')
+
+        // The private-command filter block must stay off: this unit never answers that query,
+        // so offering a reset button backed by it would be a dead control.
+        assert.ok(!components.filterused, 'no filterused sensor')
+        assert.ok(!components.filterreset, 'no filterreset button')
+
+        // Replay the values response now that the config exists, so the fields publish.
+        thinq.emit('data', buf(CST_QUERY_RESPONSE_HEX))
+        tickMockTimers(t, 1000)
+
+        // Values match the capture (and the figure the ThinQ cloud showed for the same unit).
+        assert.equal(ha.getProperty(DEVICE_ID, 'filterremaining', 'state'), 2284)
+        assert.equal(ha.getProperty(DEVICE_ID, 'filterlife', 'state'), 2400)
+        dev.drop()
+    })
+})
