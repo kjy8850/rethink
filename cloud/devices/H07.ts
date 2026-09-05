@@ -10,9 +10,10 @@ import log from '@/util/logging'
  * LG Dishwasher H07 (ThinQ modelName "H07", modelId/kind "H07", DeviceType 204,
  * modemType RTK_RTL8720cm).
  *
- * Status: PARTIALLY mapped as of 2026-09-06. Only `state` is backed by real evidence; every
- * other field is still exposed as a raw diagnostic byte dump. See the two sections below for
- * exactly what was confirmed and why, and what deliberately was NOT mapped.
+ * Status: mapped as of 2026-09-05 (web-verified pass). `state` plus 9 settings fields are now
+ * backed by real evidence gathered via a controlled LG ThinQ Web test session (see below).
+ * Course/Process/RemainTime/Door-by-deliberate-test/etc. remain unconfirmed and stay in
+ * `raw_status_record` as a raw diagnostic byte dump.
  *
  * ---- Envelope (confirmed, unchanged from the original stub) ----
  * Wire format is the same "AA [len] ...inner [checksum^0x55] BB" envelope as H11.ts (see
@@ -75,21 +76,71 @@ import log from '@/util/logging'
  *             (POWEROFF/INITIAL/RUNNING/PAUSE/STANDBY/END/POWERFAIL -> 0/1/2/3/4/5/6). Only
  *             codes 0, 1 and 4 were actually observed; 2/3/5/6 are carried over from the
  *             enum order for completeness but are UNCONFIRMED -- any other code renders as
- *             `UNKNOWN(n)` rather than guessing.
- * byte[3]  -- constant 0x00 in every sample. Structurally this is where H11's `processCode`
- *             lives (curStatus[3] there). Plausible reading: Process=NONE(0), consistent with
- *             an idle unit that never ran a cycle -- but since it never changed, this is an
- *             unconfirmed structural guess, not evidence, so it is deliberately NOT promoted
- *             to its own sensor; it's visible in `raw_status_record` instead.
- * byte[4..45] -- everything else. Some of these bytes did change during the observed
- *             boot-sequence transient (e.g. byte[7]/[8]/[13]/[14]/[18]/[22] all moved together
- *             while State sat at INITIAL, then reverted once State reached STANDBY), which
- *             hints they may be self-test/default-course-preview fields -- but with no real
- *             course ever started, no door ever opened, and no way to distinguish
- *             "course/time/door/rinse/salt/etc." from "self-test scratch values" among them,
- *             mapping any of them individually would be a guess. They are left entirely raw
- *             in `raw_status_record` (hex, byte[2] onward, so State is visible there too for
- *             cross-checking) for future reverse engineering once real events are captured.
+ *             `UNKNOWN(n)` rather than guessing. Re-confirmed 2026-09-05 (POWEROFF -> INITIAL
+ *             transition captured again via a real remote power-on through LG ThinQ Web).
+ * byte[3]  -- constant 0x00 while idle/STANDBY, observed 0x01 during the transient
+ *             post-power-on self-check window (same window where byte[2]=INITIAL). Plausible
+ *             reading: Process=NONE(0) vs a transient self-test process code -- still
+ *             unconfirmed as a real Process enum since we never started an actual course, so
+ *             it is deliberately NOT promoted to its own sensor; visible in `raw_status_record`.
+ *
+ * ---- Settings fields confirmed 2026-09-05 via a controlled LG ThinQ Web A/B test ----
+ * Methodology: logged into the real LG ThinQ account, changed exactly ONE setting at a time
+ * on the real physical unit (remote-powered-on for the duration of the test, which requires a
+ * real "다음 전원을 켤까요?" confirmation dialog -- confirming this is a deliberate, reversible
+ * app-level action, not a physical button press), captured the `raw_status_record` published
+ * immediately before and after each change via `ha_get_logs`, diffed byte-for-byte, and
+ * reverted every setting back to its original value immediately after capturing the diff. Every
+ * field below reproduced cleanly (changed at the exact moment of the app action and nowhere
+ * else) and is corroborated by H11.ts having the *exact same bit position* for the semantically
+ * equivalent field (H07 and H11 clearly share the same underlying status-record layout beyond
+ * just the envelope). Byte numbering below is relative to `raw_status_record` (i.e.
+ * data.subarray(2) -- byte[0] here is byte[2] of the full 46-byte record / State).
+ *   byte[11] bit 0x10 -- AutoSelect ("건조 옵션 자동 설정" / auto dry option). Same bit as
+ *             H11's `auto_dry` (H11 data[11] bit 0x10). A/B tested ON->OFF->ON.
+ *   byte[11] bit 0x40 -- wash-complete notification light ("세척 완료 알림등"). Same bit as
+ *             H11's `clean_reminder` (H11 data[11] bit 0x40); H07's LG ThinQ Web UI labels it
+ *             differently but it is very likely the identical physical LED/feature. A/B
+ *             tested OFF->ON->OFF.
+ *   byte[11] bit 0x02 -- Door (OPEN when set). NOT deliberately A/B tested (this project's
+ *             safety rules forbid opening/closing the door ourselves) -- but a real door-open
+ *             event happened to occur mid-session (independently of anything we did): this bit
+ *             flipped 0->1 at the same moment the LG ThinQ Web UI started showing "문이 열려
+ *             있습니다" (door is open), and it stayed set afterward (consistent with the door
+ *             actually being left open in the physical world, not reverting on its own). This
+ *             is also the *exact same bit* H11.ts uses for `door` (H11 data[11] bit 0x02).
+ *             Given the real observed transition + UI corroboration + cross-model bit-position
+ *             match, this is promoted to a confirmed `door` binary_sensor, but flagged here as
+ *             passively observed rather than actively tested.
+ *   byte[12] -- UNCONFIRMED. Bounced 0x00->0x04 during the post-power-on transient self-check
+ *             window (same window as byte[3] above) and back; never seen to move during any
+ *             deliberate settings test. Left raw.
+ *   byte[13] -- **RinseLevel** ("린스 투입량"). Raw value IS the level number (0-4), matching
+ *             the modelJSON enum and the ThinQ Web UI's own labels (0=없음, 1=2cc/약60회,
+ *             2=4cc/약30회, 3=5cc/약24회, 4=6cc/약20회). Same byte offset as H11's
+ *             `rinse_level` (H11 data[13]). A/B tested 2->4->2.
+ *   byte[14] -- **SofteningLevel** ("제품 물 경도 레벨" / water hardness / salt level). Raw
+ *             value IS the level number (0-4), matching modelJSON enum and UI labels (0=소금
+ *             불필요 ... 4=1주 간격 소금 보충). Same byte offset as H11's `salt_level` (H11
+ *             data[14]). A/B tested 1->4->1.
+ *   byte[15] bit 0x80 -- BuzzerLevel HIGH ("제품 알림음" Hi), bit 0x40 -- BuzzerLevel LOW (Lo),
+ *             neither set -- OFF (꺼짐). Exactly H11's encoding (H11 data[15], same bits,
+ *             identical priority order). A/B tested Lo->Hi->Off->Lo (all 3 states confirmed).
+ *   byte[15] bit 0x08 -- TimeIndicator ("전면 시간 표시" / front display always-on clock).
+ *             Not present in H11.ts. A/B tested ON->OFF->ON.
+ *   byte[16] bit 0x04 -- EndAlarmSound ("세척 종료음"). Same bit as H11's `end_alarm_sound`
+ *             (H11 data[16] bit 0x04). A/B tested ON->OFF->ON.
+ *   byte[19] bit 0x40 -- display brightness ("제품 시간 표시창 밝기", 밝게/어둡게). Same bit as
+ *             H11's `brightness` (H11 data[19] bit 0x40). A/B tested Bright->Dim->Bright.
+ * NOT tested (deliberately skipped): "원격제어 모드" (DetailRemoteSetting -- 사용 안 함/1회
+ * 사용/계속 사용) -- changing this away from "계속 사용" risked disabling further remote
+ * control entirely with no remote way back (would require physically touching the unit),
+ * so it was left untouched and is not mapped.
+ * byte[4..10], byte[17..18], byte[20..45] -- everything else remains unmapped: never moved
+ * during any deliberate settings test, and mapping them would require a real course run
+ * (RemainTime/Course/Process) which this pass deliberately avoided. Left entirely raw in
+ * `raw_status_record` (hex, byte[2] of the full record onward, so State is visible there too
+ * for cross-checking) for future reverse engineering once a real course run is captured.
  *
  * ---- Course / SmartCourse tables (fetched fresh 2026-09-06 via GET
  *       /bridge/<id>/modeljson, full Course + SmartCourse sections) ----
@@ -120,14 +171,23 @@ import log from '@/util/logging'
  * `target_course`/`start_course`/`cancel_course` components exist so the UI shape is right,
  * but no RS485 command bytes are sent -- byte offsets in the status record are not verified
  * (see above), and H11.ts's write commands (e.g. `F0 26 10 ...`) are H11-specific opcodes that
- * must NOT be assumed to apply to H07's protocol without independent confirmation. Calling
- * setProperty for start/cancel logs a warning and does nothing, matching the same safety
- * principle used for `initDevice` re-registration.
+ * must NOT be assumed to apply to H07's protocol without independent confirmation. The newly
+ * added settings components (rinse_level, softening_level, buzzer_level, end_alarm_sound,
+ * wash_complete_light, auto_dry, time_indicator, brightness) are READ-ONLY in practice: they
+ * mirror H11.ts's sensor/select/switch/number component shapes so the HA UI looks and behaves
+ * consistently across both dishwasher models, but `setProperty()` intentionally does not send
+ * anything for them either -- confirming the byte OFFSET a value lives at (by reading real
+ * app-driven changes) is not the same as confirming the exact WRITE encoding/checksum for a
+ * command that sets it, and guessing at a write to a real appliance is out of scope for this
+ * pass. Calling setProperty for any of these (or for start/cancel) logs a warning and does
+ * nothing, matching the same safety principle used for `initDevice` re-registration.
  *
  * ---- Next steps (see session report) ----
- * 1. Capture a real door-open/close event while this handler is active, to find the door bit.
- * 2. Start one real (short) course from the LG panel/app and capture packets through to
- *    completion, to find course/remain-time/rinse/salt/option byte offsets.
+ * 1. Start one real (short) course from the LG panel/app and capture packets through to
+ *    completion, to find course/remain-time/option byte offsets (byte[4..10], byte[17..18],
+ *    byte[20..45] all remain unmapped).
+ * 2. Deliberately capture a door open/close cycle (this pass only observed one passively) to
+ *    fully confirm byte[11] bit 0x02 beyond the cross-model + single-observation evidence above.
  * 3. Only once offsets are independently confirmed against real behavior, implement
  *    setProperty()/send() for actual commands.
  */
@@ -177,6 +237,96 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-state',
                         state_topic: '$this/state',
                         name: 'State',
+                    },
+                    door: {
+                        platform: 'binary_sensor',
+                        device_class: 'door',
+                        unique_id: '$deviceid-door',
+                        state_topic: '$this/door',
+                        name: 'Door',
+                        payload_on: 'OPEN',
+                        payload_off: 'CLOSE',
+                    },
+                    rinse_level: {
+                        platform: 'number',
+                        icon: 'mdi:water-plus',
+                        unique_id: '$deviceid-rinse_level',
+                        state_topic: '$this/rinse_level',
+                        command_topic: '$this/rinse_level/set',
+                        name: 'Rinse Level (not yet functional)',
+                        min: 0,
+                        max: 4,
+                        step: 1,
+                    },
+                    softening_level: {
+                        platform: 'number',
+                        icon: 'mdi:shaker',
+                        unique_id: '$deviceid-softening_level',
+                        state_topic: '$this/softening_level',
+                        command_topic: '$this/softening_level/set',
+                        name: 'Water Softening Level (not yet functional)',
+                        min: 0,
+                        max: 4,
+                        step: 1,
+                    },
+                    buzzer_level: {
+                        platform: 'select',
+                        icon: 'mdi:volume-high',
+                        unique_id: '$deviceid-buzzer_level',
+                        state_topic: '$this/buzzer_level',
+                        command_topic: '$this/buzzer_level/set',
+                        name: 'Buzzer Level (not yet functional)',
+                        options: ['OFF', 'LOW', 'HIGH'],
+                    },
+                    end_alarm_sound: {
+                        platform: 'switch',
+                        icon: 'mdi:music-note',
+                        unique_id: '$deviceid-end_alarm_sound',
+                        state_topic: '$this/end_alarm_sound',
+                        command_topic: '$this/end_alarm_sound/set',
+                        name: 'End Alarm Sound (not yet functional)',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    wash_complete_light: {
+                        platform: 'switch',
+                        icon: 'mdi:lightbulb',
+                        unique_id: '$deviceid-wash_complete_light',
+                        state_topic: '$this/wash_complete_light',
+                        command_topic: '$this/wash_complete_light/set',
+                        name: 'Wash Complete Notification Light (not yet functional)',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    auto_dry: {
+                        platform: 'switch',
+                        icon: 'mdi:weather-sunny',
+                        unique_id: '$deviceid-auto_dry',
+                        state_topic: '$this/auto_dry',
+                        command_topic: '$this/auto_dry/set',
+                        name: 'Auto Dry Option (not yet functional)',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    time_indicator: {
+                        platform: 'switch',
+                        icon: 'mdi:clock-digital',
+                        unique_id: '$deviceid-time_indicator',
+                        state_topic: '$this/time_indicator',
+                        command_topic: '$this/time_indicator/set',
+                        name: 'Front Time Display (not yet functional)',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    brightness: {
+                        platform: 'switch',
+                        icon: 'mdi:brightness-6',
+                        unique_id: '$deviceid-brightness',
+                        state_topic: '$this/brightness',
+                        command_topic: '$this/brightness/set',
+                        name: 'Time Display Brightness (not yet functional)',
+                        payload_on: 'HIGH',
+                        payload_off: 'LOW',
                     },
                     target_course: {
                         platform: 'select',
@@ -260,11 +410,23 @@ export default class Device extends AABBDevice {
                 this.targetCourseId = COURSE_NAME_TO_ID[mqttValue]
                 this.publishProperty('target_course', mqttValue)
             }
-        } else if (prop === 'start_course' || prop === 'cancel_course') {
-            // TODO: not implemented -- RS485 command bytes for H07 are not verified against
-            // the real device yet (see class header). Sending a guessed command to a
-            // dishwasher (unlike a read) can trigger an unwanted physical action, so this is
-            // intentionally a no-op until offsets are confirmed from real captured cycles.
+        } else if (
+            prop === 'start_course' ||
+            prop === 'cancel_course' ||
+            prop === 'rinse_level' ||
+            prop === 'softening_level' ||
+            prop === 'buzzer_level' ||
+            prop === 'end_alarm_sound' ||
+            prop === 'wash_complete_light' ||
+            prop === 'auto_dry' ||
+            prop === 'time_indicator' ||
+            prop === 'brightness'
+        ) {
+            // TODO: not implemented -- byte OFFSETS for these fields are confirmed (see class
+            // header, 2026-09-05 web-verified A/B test), but the RS485 WRITE encoding/checksum
+            // is not. Sending a guessed write command to a dishwasher (unlike a read) can
+            // trigger an unwanted physical action, so this is intentionally a no-op until the
+            // write protocol is independently confirmed from real captured commands.
             console.warn(
                 `H07: refusing to send '${prop}' -- command encoding not yet implemented/verified (safety guard)`,
             )
@@ -332,8 +494,44 @@ export default class Device extends AABBDevice {
         const stateCode = data[2]
         this.publishProperty('state', DISHWASHER_STATES[stateCode] || `UNKNOWN(${stateCode})`)
 
+        // Everything below is relative to raw_status_record, i.e. rsr[i] === data[i + 2].
+        const rsr = data.subarray(2)
+
+        // Door (rsr byte[11] bit 0x02) -- see class header: confirmed via one passively
+        // observed real transition + cross-model bit-position match with H11, not a
+        // deliberate A/B test (we do not open/close the door ourselves).
+        this.publishProperty('door', (rsr[11] & 0x02) !== 0 ? 'OPEN' : 'CLOSE')
+
+        // AutoSelect / auto dry option (rsr byte[11] bit 0x10)
+        this.publishProperty('auto_dry', (rsr[11] & 0x10) !== 0 ? 'ON' : 'OFF')
+
+        // Wash-complete notification light (rsr byte[11] bit 0x40)
+        this.publishProperty('wash_complete_light', (rsr[11] & 0x40) !== 0 ? 'ON' : 'OFF')
+
+        // RinseLevel (rsr byte[13], raw level number 0-4)
+        this.publishProperty('rinse_level', rsr[13])
+
+        // SofteningLevel / water hardness (rsr byte[14], raw level number 0-4)
+        this.publishProperty('softening_level', rsr[14])
+
+        // BuzzerLevel (rsr byte[15], bit 0x80 = HIGH, bit 0x40 = LOW, neither = OFF)
+        let buzzerLevel: string
+        if ((rsr[15] & 0x80) !== 0) buzzerLevel = 'HIGH'
+        else if ((rsr[15] & 0x40) !== 0) buzzerLevel = 'LOW'
+        else buzzerLevel = 'OFF'
+        this.publishProperty('buzzer_level', buzzerLevel)
+
+        // TimeIndicator / front display always-on clock (rsr byte[15] bit 0x08)
+        this.publishProperty('time_indicator', (rsr[15] & 0x08) !== 0 ? 'ON' : 'OFF')
+
+        // EndAlarmSound (rsr byte[16] bit 0x04)
+        this.publishProperty('end_alarm_sound', (rsr[16] & 0x04) !== 0 ? 'ON' : 'OFF')
+
+        // Time display brightness (rsr byte[19] bit 0x40)
+        this.publishProperty('brightness', (rsr[19] & 0x40) !== 0 ? 'HIGH' : 'LOW')
+
         // Everything from byte[2] onward (including the State byte itself, for cross-checking)
-        // is published verbatim -- see class header for the fields that remain unmapped.
-        this.publishProperty('raw_status_record', data.subarray(2).toString('hex').toUpperCase())
+        // is also published verbatim -- see class header for the fields that remain unmapped.
+        this.publishProperty('raw_status_record', rsr.toString('hex').toUpperCase())
     }
 }
