@@ -296,7 +296,15 @@ export default class Device extends TLVDevice {
                     max_temp: 30,
                     /* TODO: get from 0x2c2 */
                     fan_modes: ['auto', 'very low', 'low', 'medium', 'high', 'very high'],
-                    /* TODO: get allowed op modes from 0x2c1 */
+                    /*
+                     * TODO: get allowed op modes from 0x2c1 generically. Until then, hardcode the
+                     * cooling-only cassette variant: CST_570004_WW has no heat pump, but without an
+                     * explicit `modes` list HA defaults to all 6 (incl. 'heat'), which showed up as a
+                     * non-functional option in the more-info dialog.
+                     */
+                    ...(this.meta.modelName === 'CST_570004_WW'
+                        ? { modes: ['off', 'cool', 'dry', 'fan_only', 'auto'] }
+                        : {}),
                 } satisfies ClimateComponent,
             },
         })
