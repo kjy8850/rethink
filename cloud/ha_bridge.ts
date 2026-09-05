@@ -1,6 +1,7 @@
 import POT_056905_WW from './devices/POT_056905_WW'
 import WTDN3 from './devices/WTDN3'
 import H11 from './devices/H11'
+import H07 from './devices/H07'
 import RAC_056905_WW from './devices/RAC_056905_WW'
 import WIN_056905_WW from './devices/WIN_056905_WW'
 import Dev_2REF11EIDA__4 from './devices/2REF11EIDA__4'
@@ -52,6 +53,9 @@ const t2deviceTypes: Record<string, T2Factory> = {
     ['2RES1VE600FWC']: Dev_2RES1VE600FWC,
     ['STUDIO_HOOD']: Dev_STUDIO_HOOD,
     ['H11']: H11,
+    // LG dishwasher H07 (DeviceType 204, RTK_RTL8720cm modem). STUB -- raw diagnostic
+    // sensors only, no field mapping confirmed yet. See H07.ts header for details.
+    ['H07']: H07,
     ['Y_V8_Y___W.B32QEUK']: Y_V8_Y___W_B32QEUK,
     ['F_V7_Y___W.B_2QEUK']: F_V8_Y___W_B_2QEUK, // NOTE: we reuse F_V8_Y___W_B_2QEUK as the models appear to be compatible
     ['F_V8_Y___W.B_2QEUK']: F_V8_Y___W_B_2QEUK,
