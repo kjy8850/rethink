@@ -151,22 +151,6 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
     ])
 
     /*
-     * register()에서 홈에서 제거한 뒤 재등록할 기기 id.
-     *
-     * 기본값은 "절대 제거하지 않음"이다. 이 목록에 있고 동시에 홈 목록에 잡히는 기기만
-     * "제거 → 새 인증서로 재등록" 경로를 탄다. 워시타워 1+1 페어의 addDevice가 등록된
-     * 상태에서 계속 '0005'로 거부되는 원인을 좁히려는 의도적인 시도이며, 목록에 없는
-     * 에어컨 4대와 식기세척기는 영향을 받지 않는다.
-     *
-     * 주의: LG가 removeDevice 시점에 기기의 네트워크 자격증명을 폐기시키면 AP 모드
-     * 재프로비저닝이 필요해질 수 있다.
-     */
-    static readonly removalAllowlist = new Set<string>([
-        'eecaeaf9-17a8-178d-802b-d48d260bc76c', // 세탁기 FAKPK21021
-        'c67e2c34-67a5-1ecc-8376-d48d260bc760', // 건조기 BDH_D39302_KR
-    ])
-
-    /*
      * addDevice에 넘길 alias를 결정한다: 사고 복구용 오버라이드 > 계정에 남아있는 alias > 폴백.
      */
     resolveAlias(id: string) {
@@ -337,48 +321,23 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
         if (!deviceType) throw new Error('Device type must be specified')
 
         /*
-         * registrationPlan()'s removeFirst is honoured only for the ids in removalAllowlist.
-         *
-         * Upstream removes an appliance the listing does not report, on the reasoning that there is
-         * then nothing to lose. That does not hold for a WashTower pair: the listing omits one
-         * intermittently while it is still registered (modelJSON for the same id succeeded minutes
-         * either side of a listing that omitted it), and the removal that followed deleted the pair
-         * from the account for real -- twice here, the appliance vanishing from the ThinQ app both
-         * times. Bridging needs the credentials from pair(), not a fresh registration, and
-         * addDevice() already tolerates an appliance the home holds, so the default is to keep the
-         * registration and never remove.
-         *
-         * The allowlist exists so the remove-then-add path can be re-tested on one named appliance
-         * without putting the other six back at risk. Every id absent from it takes the safe path.
-         */
-        /*
-         * rethink never removes an appliance from the home. The only deletion in this workflow is
+         * rethink never removes an appliance from the home. Deleting one is what breaks a WashTower's
+         * 1+1 pair group in the LG cloud, and a removed-then-refused registration leaves the pair
+         * gone from the ThinQ app for real -- seen here twice. The only deletion in this workflow is
          * the owner's own, made in the ThinQ app, which they can undo there by registering again.
          *
          * registrationPlan is still consulted, but only to report whether the home lists the
          * appliance; its removeFirst is not acted on. The alias comes from resolveAlias instead,
-         * because once the owner has deleted an appliance the listing carries no name for it and
+         * because once an appliance is gone from the home the listing carries no name for it and
          * registrationPlan falls back to "Rethink xxxxxxxx" -- the fallback that overwrote the four
          * cassettes' names in the earlier incident.
          */
         const { removeFirst } = registrationPlan(await client.listDevices(), device.id)
         const alias = this.resolveAlias(device.id)
-
-        // registrationPlan's removeFirst is set when the home does NOT list the appliance, ie. when
-        // there is nothing to delete; the removal we want is the opposite case. Remove only an
-        // appliance that is both listed and on the allowlist, so the same build covers either route
-        // into this: rethink deletes it here, or the owner already deleted it in the ThinQ app.
         const listed = !removeFirst
-        const removeNow = listed && Bridge.removalAllowlist.has(device.id)
 
-        if (removeNow) {
-            console.log(`Removing ${device.id} ("${alias}") from the home before re-adding`)
-            statusCallback('Removing device from home')
-            await client.removeDevice(device.id)
-        } else {
-            console.log(`Registering ${device.id} as "${alias}" (listed in the home: ${listed}, removing: false)`)
-            statusCallback(listed ? 'Keeping existing registration' : 'Adding device to home')
-        }
+        console.log(`Registering ${device.id} as "${alias}" (listed in the home: ${listed}; nothing is removed)`)
+        statusCallback(listed ? 'Keeping existing registration' : 'Adding device to home')
 
         let clientDevice: Thinq1Device | Thinq2Device
 
