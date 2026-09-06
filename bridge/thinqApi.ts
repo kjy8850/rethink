@@ -272,6 +272,9 @@ export class Client {
                     `Registration of ${device.deviceId} refused with '0005' (paired-appliance group). ` +
                         'Bridging continues on the credentials from pair(); the home registration is unchanged.',
                 )
+                // '0005' is undocumented, so log whatever else the cloud sent back with it -- the
+                // resultCode alone has not been enough to tell what it is objecting to.
+                console.log(`  '0005' response body: ${JSON.stringify(err.result)}`)
                 return
             }
             if (err instanceof RemoteError && err.resultCode === ErrorCodes.ERROR_ALREADY_DEVICES_REGISTERED_IN_HOME) {

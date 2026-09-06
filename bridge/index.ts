@@ -136,24 +136,30 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
      * 이 이름으로 덮어써졌다. 계정 alias 자체가 이미 오염되어 deviceNames로는 복구가 안 되므로,
      * HA 쪽에 남아있던 원래 이름을 device_id별로 하드코딩해 강제 복구한다.
      * 다른 기기나 향후 신규 기기에는 영향 없음(이 맵에 없는 id는 기존 로직 그대로 동작).
+     *
+     * 워시타워 2대는 사고가 아니라 예방 목적으로 넣어둔다. 소유자가 ThinQ 앱에서 직접 삭제한
+     * 뒤 재등록을 시도하면 계정 목록에 이름이 남아있지 않아 registrationPlan이 "Rethink
+     * xxxxxxxx" 폴백을 쓰게 되는데, 그러면 에어컨 4대와 똑같이 이름이 덮어써진다.
      */
     static readonly incidentAliasOverrides = new Map<string, string>([
         ['ab4efd03-79fc-14a3-a2cf-1c392976c686', '창고에어컨'],
         ['d5d9e732-4383-1b37-a909-1c392976f206', '컴퓨터에어컨'],
         ['bf24473f-86f1-1379-8458-1c3929783445', '거실에어컨'],
         ['62eb33bb-08f7-185d-bb02-1c392976c69d', '안방에어컨'],
+        ['eecaeaf9-17a8-178d-802b-d48d260bc76c', '세탁기'], // FAKPK21021
+        ['c67e2c34-67a5-1ecc-8376-d48d260bc760', '워시타워'], // BDH_D39302_KR
     ])
 
     /*
-     * register()에서 removeFirst를 실제로 실행할 기기 id.
+     * register()에서 홈에서 제거한 뒤 재등록할 기기 id.
      *
-     * 기본값은 "절대 제거하지 않음"이다(register()의 주석 참조). 이 목록에 있는 id만 예외로
-     * 업스트림과 동일한 "홈에서 제거 → 새 인증서로 재등록" 경로를 탄다. 워시타워 1+1 페어의
-     * addDevice가 계속 '0005'로 거부되는 원인을 좁히려는 의도적인 재시도이며, 목록에 없는
+     * 기본값은 "절대 제거하지 않음"이다. 이 목록에 있고 동시에 홈 목록에 잡히는 기기만
+     * "제거 → 새 인증서로 재등록" 경로를 탄다. 워시타워 1+1 페어의 addDevice가 등록된
+     * 상태에서 계속 '0005'로 거부되는 원인을 좁히려는 의도적인 시도이며, 목록에 없는
      * 에어컨 4대와 식기세척기는 영향을 받지 않는다.
      *
      * 주의: LG가 removeDevice 시점에 기기의 네트워크 자격증명을 폐기시키면 AP 모드
-     * 재프로비저닝이 필요해질 수 있다. 실제로 이전 두 번의 시도에서 세탁기가 그랬다.
+     * 재프로비저닝이 필요해질 수 있다.
      */
     static readonly removalAllowlist = new Set<string>([
         'eecaeaf9-17a8-178d-802b-d48d260bc76c', // 세탁기 FAKPK21021
@@ -346,24 +352,32 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
          * without putting the other six back at risk. Every id absent from it takes the safe path.
          */
         /*
-         * registrationPlan sets removeFirst only for an appliance the home does not list, ie. the
-         * case where there is nothing to delete anyway. Forcing the remove-then-add path on an
-         * appliance that IS registered therefore needs the allowlist to override it outright.
+         * rethink never removes an appliance from the home. The only deletion in this workflow is
+         * the owner's own, made in the ThinQ app, which they can undo there by registering again.
          *
-         * alias is read before the removal, so the account name survives the re-add.
+         * registrationPlan is still consulted, but only to report whether the home lists the
+         * appliance; its removeFirst is not acted on. The alias comes from resolveAlias instead,
+         * because once the owner has deleted an appliance the listing carries no name for it and
+         * registrationPlan falls back to "Rethink xxxxxxxx" -- the fallback that overwrote the four
+         * cassettes' names in the earlier incident.
          */
-        const { removeFirst, alias } = registrationPlan(await client.listDevices(), device.id)
-        const forceRemoval = Bridge.removalAllowlist.has(device.id)
+        const { removeFirst } = registrationPlan(await client.listDevices(), device.id)
+        const alias = this.resolveAlias(device.id)
 
-        if (removeFirst || forceRemoval) {
-            console.log(
-                `Removing ${device.id} ("${alias}") from the home before re-adding ` +
-                    `(registered: ${!removeFirst}, forced by allowlist: ${forceRemoval})`,
-            )
+        // registrationPlan's removeFirst is set when the home does NOT list the appliance, ie. when
+        // there is nothing to delete; the removal we want is the opposite case. Remove only an
+        // appliance that is both listed and on the allowlist, so the same build covers either route
+        // into this: rethink deletes it here, or the owner already deleted it in the ThinQ app.
+        const listed = !removeFirst
+        const removeNow = listed && Bridge.removalAllowlist.has(device.id)
+
+        if (removeNow) {
+            console.log(`Removing ${device.id} ("${alias}") from the home before re-adding`)
             statusCallback('Removing device from home')
             await client.removeDevice(device.id)
         } else {
-            statusCallback('Keeping existing registration')
+            console.log(`Registering ${device.id} as "${alias}" (listed in the home: ${listed}, removing: false)`)
+            statusCallback(listed ? 'Keeping existing registration' : 'Adding device to home')
         }
 
         let clientDevice: Thinq1Device | Thinq2Device
