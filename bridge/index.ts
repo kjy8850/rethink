@@ -345,14 +345,24 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
          * The allowlist exists so the remove-then-add path can be re-tested on one named appliance
          * without putting the other six back at risk. Every id absent from it takes the safe path.
          */
+        /*
+         * registrationPlan sets removeFirst only for an appliance the home does not list, ie. the
+         * case where there is nothing to delete anyway. Forcing the remove-then-add path on an
+         * appliance that IS registered therefore needs the allowlist to override it outright.
+         *
+         * alias is read before the removal, so the account name survives the re-add.
+         */
         const { removeFirst, alias } = registrationPlan(await client.listDevices(), device.id)
+        const forceRemoval = Bridge.removalAllowlist.has(device.id)
 
-        if (removeFirst && Bridge.removalAllowlist.has(device.id)) {
-            console.log(`${device.id} is on the removal allowlist: removing it from the home before re-adding`)
+        if (removeFirst || forceRemoval) {
+            console.log(
+                `Removing ${device.id} ("${alias}") from the home before re-adding ` +
+                    `(registered: ${!removeFirst}, forced by allowlist: ${forceRemoval})`,
+            )
             statusCallback('Removing device from home')
             await client.removeDevice(device.id)
         } else {
-            if (removeFirst) console.log(`${device.id} not on the removal allowlist: keeping the existing registration`)
             statusCallback('Keeping existing registration')
         }
 
