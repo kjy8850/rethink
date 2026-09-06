@@ -1,14 +1,11 @@
 import express from 'express'
 import stripJsonComments from 'strip-json-comments'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import * as https from 'node:https'
-import { spawnSync } from 'node:child_process'
-import { dirname, resolve, join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { dirname, resolve } from 'node:path'
 import { Broker } from './cloud/mqtt-broker'
 import * as tls from 'node:tls'
 import * as net from 'node:net'
-import { X509Certificate } from 'node:crypto'
 import { routes as thinq1Routes } from './cloud/thinq1/http'
 import { routes as thinq2Routes } from './cloud/thinq2/provisioning'
 import { DeviceAcceptor as T1Acceptor } from './cloud/thinq1/device'
@@ -16,6 +13,8 @@ import { DeviceAcceptor as T2Acceptor } from './cloud/thinq2/device'
 import { Connection as HA_connection } from './cloud/homeassistant'
 import HA_bridge from './cloud/ha_bridge'
 import { normalize as normalizeConfig, RawConfig, CA } from './util/config'
+import { createCa } from './util/pki'
+import { CertificateIssuer } from './util/sni'
 import * as Management from './management'
 
 import log, { setFilter as setLogFilter } from './util/logging'
@@ -38,137 +37,44 @@ setLogFilter((topic) => {
     return enabled[topic] || enabled['all']
 })
 
-// if you add spaces here, you will have to fix quoting in the code below
-// the CA is also the server
-function loadOrCreateCert(): CA {
-    let keypem: string, certpem: string
-    try {
-        keypem = readFileSync(config.ca_key_file).toString('utf-8')
-        certpem = readFileSync(config.ca_cert_file).toString('utf-8')
+const caFiles = { certFile: config.ca_cert_file, keyFile: config.ca_key_file }
 
-        if (!new X509Certificate(certpem).checkHost(config.hostname))
-            throw new Error('invalid subject, creating new certificate')
+// The CA is the trust anchor an appliance pins when it fetches /route/certificate. It is no longer
+// served as a server certificate - every name we answer to gets its own leaf below - so its subject
+// does not have to match anything, and it is created once and then left alone. Only "there is no CA
+// yet" leads to making one: overwriting a CA that appliances have already pinned would leave every
+// one of them unable to connect until it is provisioned again, which is not a thing to do because a
+// file could not be read.
+function loadOrCreateCert(): CA {
+    try {
+        return {
+            key: readFileSync(config.ca_key_file).toString('utf-8'),
+            cert: readFileSync(config.ca_cert_file).toString('utf-8'),
+        }
     } catch (err) {
-        log('status', 'Creating a new key/certificate for the CA')
-        spawnSync('openssl', [
-            'req',
-            '-x509',
-            '-newkey',
-            'rsa:4096',
-            '-keyout',
-            config.ca_key_file,
-            '-out',
-            config.ca_cert_file,
-            '-sha256',
-            '-days',
-            '3650',
-            '-nodes',
-            '-subj',
-            '/CN=' + config.hostname,
-        ])
-        keypem = readFileSync(config.ca_key_file).toString('utf-8')
-        certpem = readFileSync(config.ca_cert_file).toString('utf-8')
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
 
-    return { key: keypem, cert: certpem }
+    log('status', 'Creating a new key/certificate for the CA')
+    createCa(config.hostname, caFiles)
+
+    return {
+        key: readFileSync(config.ca_key_file).toString('utf-8'),
+        cert: readFileSync(config.ca_cert_file).toString('utf-8'),
+    }
 }
 
 const ca = loadOrCreateCert()
 
-// Real LG AC units of the same modelId can each demand a different SNI hostname when
-// connecting to the MQTTS port (e.g. `kic-common.lgthinq.com` on one unit, `kic-mclip.lgthinq.com`
-// on another). rethink only ever presents one certificate, issued for `config.hostname`, via
-// `SNICallback` being unset (Node falls back to the options passed to tls.createServer/https.createServer
-// for every connection regardless of the requested name). The HTTPS provisioning port (443) doesn't
-// validate the server cert so any single name slips through there, but the MQTTS port (8885) does
-// validate it, so a unit asking for a name that doesn't match `config.hostname` fails to connect.
-//
-// To fix that, every server below gets a SNICallback that mints a leaf certificate on demand for
-// whatever name was requested, signed by our own CA (the same CA whose public cert is already
-// handed to devices at GET /route/certificate, so anything it signs is trusted). Certificates are
-// cached per servername so we only shell out to openssl once per distinct SNI name.
-//
-// Implementation note (openssl 3 pitfalls): `openssl x509 -req -CA <cert> -key <key>` silently
-// ignores `-key` and signs with an ephemeral key instead of the CA's -- the correct flag to sign
-// with the CA's private key is `-CAkey`, not `-key` (that's reserved for signing the *new* leaf
-// key request, which we don't need here since we generate the CSR with its own key first). We also
-// avoid piping the generated key/cert through /dev/stdout (which fails when stdout is a pipe, as it
-// is when spawned from Node) by writing everything to a scratch directory instead.
-const sniContextCache = new Map<string, tls.SecureContext>()
+// Appliances that reach us by redirection rather than by setup still ask for an LG hostname, which
+// varies between units of the same model. Serve each requested name its own certificate, signed by
+// the CA they already trust.
+const issuer = new CertificateIssuer(caFiles, config.hostname)
 
-function issueLeafCertificate(servername: string): { key: string; cert: string } {
-    const dir = mkdtempSync(join(tmpdir(), 'rethink-sni-'))
-    try {
-        const caKeyPath = join(dir, 'ca.key')
-        const caCertPath = join(dir, 'ca.crt')
-        const leafKeyPath = join(dir, 'leaf.key')
-        const leafCsrPath = join(dir, 'leaf.csr')
-        const leafCertPath = join(dir, 'leaf.crt')
-
-        writeFileSync(caKeyPath, ca.key)
-        writeFileSync(caCertPath, ca.cert)
-
-        // 1. generate a fresh keypair + CSR for this SNI name
-        spawnSync('openssl', [
-            'req',
-            '-new',
-            '-newkey',
-            'rsa:2048',
-            '-nodes',
-            '-keyout',
-            leafKeyPath,
-            '-out',
-            leafCsrPath,
-            '-subj',
-            '/CN=' + servername,
-        ])
-
-        // 2. sign the CSR with our CA (-CAkey, NOT -key, or openssl 3 ignores the CA's key)
-        spawnSync('openssl', [
-            'x509',
-            '-req',
-            '-in',
-            leafCsrPath,
-            '-CA',
-            caCertPath,
-            '-CAkey',
-            caKeyPath,
-            '-CAcreateserial',
-            '-out',
-            leafCertPath,
-            '-days',
-            '3650',
-            '-sha256',
-        ])
-
-        return {
-            key: readFileSync(leafKeyPath, 'utf-8'),
-            cert: readFileSync(leafCertPath, 'utf-8'),
-        }
-    } finally {
-        rmSync(dir, { recursive: true, force: true })
-    }
-}
-
-function sniCallback(servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) {
-    try {
-        let ctx = sniContextCache.get(servername)
-        if (!ctx) {
-            const leaf = issueLeafCertificate(servername)
-            ctx = tls.createSecureContext({ key: leaf.key, cert: leaf.cert + '\n' + ca.cert })
-            sniContextCache.set(servername, ctx)
-            log('status', `Issued SNI certificate for ${servername}`)
-        }
-        cb(null, ctx)
-    } catch (err) {
-        log('status', `Failed to issue SNI certificate for ${servername}: ${err}`)
-        cb(err as Error)
-    }
-}
-
-// Default TLS options for every server below: fall back to the config.hostname cert for
-// non-SNI clients, but let SNICallback override with a per-name cert whenever one is requested.
-const tlsOptions = { ...ca, SNICallback: sniCallback }
+// The default certificate - what a connection that sends no SNI at all gets, an appliance reaching
+// us by address among them - is a leaf for config.hostname rather than the CA itself, so that it
+// carries a subjectAltName. The CA has only a subject, which clients are free to stop honouring.
+const tlsOptions = { ...issuer.issue(config.hostname), SNICallback: issuer.SNICallback }
 
 // Thinq1
 function t1setup(manager: DeviceManager) {
@@ -206,6 +112,8 @@ function t2setup(manager: DeviceManager) {
         next()
     })
 
+    // `ca`, not `tlsOptions`: these routes hand out the CA itself and sign appliance certificates
+    // with it. An appliance pins what it gets here, so it has to be the CA, never a per-name leaf.
     app.use(thinq2Routes(config, ca))
 
     // fallback
