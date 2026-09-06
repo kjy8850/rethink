@@ -145,6 +145,22 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
     ])
 
     /*
+     * register()에서 removeFirst를 실제로 실행할 기기 id.
+     *
+     * 기본값은 "절대 제거하지 않음"이다(register()의 주석 참조). 이 목록에 있는 id만 예외로
+     * 업스트림과 동일한 "홈에서 제거 → 새 인증서로 재등록" 경로를 탄다. 워시타워 1+1 페어의
+     * addDevice가 계속 '0005'로 거부되는 원인을 좁히려는 의도적인 재시도이며, 목록에 없는
+     * 에어컨 4대와 식기세척기는 영향을 받지 않는다.
+     *
+     * 주의: LG가 removeDevice 시점에 기기의 네트워크 자격증명을 폐기시키면 AP 모드
+     * 재프로비저닝이 필요해질 수 있다. 실제로 이전 두 번의 시도에서 세탁기가 그랬다.
+     */
+    static readonly removalAllowlist = new Set<string>([
+        'eecaeaf9-17a8-178d-802b-d48d260bc76c', // 세탁기 FAKPK21021
+        'c67e2c34-67a5-1ecc-8376-d48d260bc760', // 건조기 BDH_D39302_KR
+    ])
+
+    /*
      * addDevice에 넘길 alias를 결정한다: 사고 복구용 오버라이드 > 계정에 남아있는 alias > 폴백.
      */
     resolveAlias(id: string) {
@@ -315,7 +331,7 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
         if (!deviceType) throw new Error('Device type must be specified')
 
         /*
-         * registrationPlan() decides the name; its removeFirst is deliberately not acted on here.
+         * registrationPlan()'s removeFirst is honoured only for the ids in removalAllowlist.
          *
          * Upstream removes an appliance the listing does not report, on the reasoning that there is
          * then nothing to lose. That does not hold for a WashTower pair: the listing omits one
@@ -323,11 +339,22 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
          * either side of a listing that omitted it), and the removal that followed deleted the pair
          * from the account for real -- twice here, the appliance vanishing from the ThinQ app both
          * times. Bridging needs the credentials from pair(), not a fresh registration, and
-         * addDevice() already tolerates an appliance the home holds, so nothing is given up by
-         * never removing.
+         * addDevice() already tolerates an appliance the home holds, so the default is to keep the
+         * registration and never remove.
+         *
+         * The allowlist exists so the remove-then-add path can be re-tested on one named appliance
+         * without putting the other six back at risk. Every id absent from it takes the safe path.
          */
-        const { alias } = registrationPlan(await client.listDevices(), device.id)
-        statusCallback('Keeping existing registration')
+        const { removeFirst, alias } = registrationPlan(await client.listDevices(), device.id)
+
+        if (removeFirst && Bridge.removalAllowlist.has(device.id)) {
+            console.log(`${device.id} is on the removal allowlist: removing it from the home before re-adding`)
+            statusCallback('Removing device from home')
+            await client.removeDevice(device.id)
+        } else {
+            if (removeFirst) console.log(`${device.id} not on the removal allowlist: keeping the existing registration`)
+            statusCallback('Keeping existing registration')
+        }
 
         let clientDevice: Thinq1Device | Thinq2Device
 
