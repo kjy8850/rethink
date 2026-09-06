@@ -261,16 +261,21 @@ export class Client {
                 body: JSON.stringify(body),
             })
         } catch (err) {
-            // WashTower (washer+dryer) is treated by LG's cloud as a paired 1+1 device group:
-            // registering the washer auto-links the dryer server-side, so a subsequent addDevice
-            // for the dryer gets rejected with resultCode '0005' (undocumented -- not in
-            // ErrorCodes -- but confirmed via community report, see
-            // https://github.com/anszom/rethink/issues/79#issuecomment-5299814720). This is
-            // expected/benign for WashTower pairs -- the group registration already succeeded
-            // when the first unit was added -- so treat it the same as "already registered"
-            // rather than throwing.
+            // '0005' is undocumented (not in ErrorCodes) and a WashTower pair answers with it on
+            // every addDevice. A community report reads it as "already registered", the cloud
+            // having linked washer and dryer as one 1+1 group when the first unit was added
+            // (https://github.com/anszom/rethink/issues/79#issuecomment-5299814720), and bridging
+            // does work from the credentials pair() already issued -- so this is not fatal.
+            //
+            // It is not proof of registration either: seen here on a pair that modelJSON and the
+            // ThinQ app both reported as absent from the home. Say what happened rather than
+            // reporting success, so a bridge that is up but unregistered is not mistaken for a
+            // finished registration.
             if (err instanceof RemoteError && err.resultCode === '0005') {
-                console.log('WashTower dual-registration detected (0005). Ignoring error to maintain bridge.')
+                console.log(
+                    `Registration of ${device.deviceId} refused with '0005' (paired-appliance group). ` +
+                        'Bridging continues on the credentials from pair(); the home registration is unchanged.',
+                )
                 return
             }
             if (err instanceof RemoteError && err.resultCode === ErrorCodes.ERROR_ALREADY_DEVICES_REGISTERED_IN_HOME) {
