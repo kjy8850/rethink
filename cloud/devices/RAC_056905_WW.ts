@@ -494,6 +494,34 @@ export default class Device extends TLVDevice {
             })
         }
 
+        /*
+         * The same two tags also drive the climate entity's own swing fields, so the stock card
+         * and the voice assistants have them where they expect. Both readings are registered:
+         * a switch a dashboard can place on its own, and the climate field -- they are views of
+         * one tag, so they cannot disagree.
+         */
+        if (cassetteVane && this.hasTag(0x205)) {
+            config['components']['climate']['swing_modes'] = ['on', 'off']
+            this.addField(config, {
+                id: 0x205,
+                name: 'swing_mode',
+                comp: 'climate',
+                read_xform: (raw) => (raw ? 'on' : 'off'),
+                write_xform: (val) => (val === 'on' ? 1 : 0),
+            })
+        }
+
+        if (cassetteVane && this.hasTag(0x206)) {
+            config['components']['climate']['swing_horizontal_modes'] = ['on', 'off']
+            this.addField(config, {
+                id: 0x206,
+                name: 'swing_horizontal_mode',
+                comp: 'climate',
+                read_xform: (raw) => (raw ? 'on' : 'off'),
+                write_xform: (val) => (val === 'on' ? 1 : 0),
+            })
+        }
+
         for (const [tag, name, desc, icon] of [
             [0x205, 'swingvertical', 'Vertical swing', 'mdi:arrow-up-down'],
             [0x206, 'swinghorizontal', 'Horizontal swing', 'mdi:arrow-left-right'],

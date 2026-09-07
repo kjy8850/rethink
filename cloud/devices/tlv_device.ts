@@ -25,7 +25,13 @@ export default class TLVDevice extends HADevice {
     query_timer: ReturnType<typeof setInterval> | undefined
     query_last_timestamp: number | undefined = undefined
     query_last_interval: number | undefined = undefined
-    fields_by_id: Record<number, FieldDefinition> = {}
+    /*
+     * A tag can feed more than one entity. A cassette's vertical swing, say, is worth having
+     * both as the climate entity's swing_mode -- where the stock card and voice assistants
+     * find it -- and as a switch that a dashboard can place on its own. Keyed by a single
+     * definition, whichever was registered last silently won and the other never updated.
+     */
+    fields_by_id: Record<number, FieldDefinition[]> = {}
     fields_by_ha: Record<string, FieldDefinition> = {}
     raw_clip_state: Record<number, number> = {}
     query_caps_timeout: ReturnType<typeof setInterval> | undefined = undefined
@@ -50,7 +56,7 @@ export default class TLVDevice extends HADevice {
 
     // we waste memory by storing the field set per-device, not per-class. Whatever.
     addField(config: DeviceDiscovery, options: FieldDefinition, autoreg?: boolean) {
-        if (options.id) this.fields_by_id[options.id] = options
+        if (options.id) (this.fields_by_id[options.id] ??= []).push(options)
 
         let fullName = options.comp + '-' + options.name
         this.fields_by_ha[fullName] = options
@@ -271,24 +277,24 @@ export default class TLVDevice extends HADevice {
     processKeyValue(k: number, v: number) {
         this.raw_clip_state[k] = v
 
-        const def = this.fields_by_id[k]
-        if (!def) return
+        for (const def of this.fields_by_id[k] ?? []) {
+            let processed: string | number = v
 
-        let processed: string | number = v
+            if (def.read_xform) {
+                let tmp = def.read_xform(processed)
+                // A field that cannot make sense of this value skips it; the others still run.
+                if (tmp === undefined) continue
+                processed = tmp
+            }
 
-        if (def.read_xform) {
-            let tmp = def.read_xform(processed)
-            if (tmp === undefined) return
-            processed = tmp
-        }
+            var doRead = true
+            if (def.read_callback) doRead = def.read_callback(processed)
+            if (doRead) {
+                if (def.readable === false) continue
 
-        var doRead = true
-        if (def.read_callback) doRead = def.read_callback(processed)
-        if (doRead) {
-            if (def.readable === false) return
-
-            let fullName = def.comp + '-' + def.name
-            this.HA.publishProperty(this.id, fullName, processed)
+                let fullName = def.comp + '-' + def.name
+                this.HA.publishProperty(this.id, fullName, processed)
+            }
         }
     }
 
