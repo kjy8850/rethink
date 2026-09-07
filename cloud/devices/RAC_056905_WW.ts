@@ -444,6 +444,74 @@ export default class Device extends TLVDevice {
             write_attach: [0x1f9, 0x1fa],
         })
 
+        /*
+         * Ceiling cassettes report the vane on a different set of tags from the wall units this
+         * file was written for, and 0x321 carries something else there: on a CST_570004_WW it
+         * sits at 0x222x and barely moves, so the 0x321 handler below reads it as an index past
+         * the end of its table and publishes nothing at all -- the swing mode shows as unknown.
+         *
+         * Observed on the appliance, one control at a time:
+         *   0x180  vane position, (raw >> 8) & 0xf stepping 1..6 as the position is moved
+         *   0x102  vertical swing, 100 on / 32 off  (100 is the cloud's own value for swinging)
+         *   0x100  horizontal swing, in bits 0x30
+         * which is exactly what the ThinQ app offers for one of these: an up/down position with
+         * a swing toggle under it, and a swing toggle alone for left-right with no position.
+         *
+         * Read-only for now: writing these is not yet worked out, and 0x100 carries other bits
+         * whose meaning is unknown, so a careless write there would change something unnamed.
+         */
+        if (this.hasTag(0x180)) {
+            const vane = {
+                platform: 'sensor',
+                unique_id: '$deviceid-vaneposition',
+                name: 'Vane position',
+                icon: 'mdi:air-conditioner',
+                state_class: 'measurement',
+            } as const
+            config['components']['vaneposition'] = vane
+            this.addField(config, {
+                id: 0x180,
+                name: '',
+                comp: 'vaneposition',
+                writable: false,
+                read_xform: (raw) => (raw >> 8) & 0x0f,
+            })
+        }
+
+        if (this.hasTag(0x102)) {
+            const sv = {
+                platform: 'binary_sensor',
+                unique_id: '$deviceid-swingvertical',
+                name: 'Vertical swing',
+                icon: 'mdi:arrow-up-down',
+            } as const
+            config['components']['swingvertical'] = sv
+            this.addField(config, {
+                id: 0x102,
+                name: '',
+                comp: 'swingvertical',
+                writable: false,
+                read_xform: (raw) => (raw === 100 ? 'ON' : 'OFF'),
+            })
+        }
+
+        if (this.hasTag(0x100)) {
+            const sh = {
+                platform: 'binary_sensor',
+                unique_id: '$deviceid-swinghorizontal',
+                name: 'Horizontal swing',
+                icon: 'mdi:arrow-left-right',
+            } as const
+            config['components']['swinghorizontal'] = sh
+            this.addField(config, {
+                id: 0x100,
+                name: '',
+                comp: 'swinghorizontal',
+                writable: false,
+                read_xform: (raw) => (raw & 0x30 ? 'ON' : 'OFF'),
+            })
+        }
+
         if (this.hasCapOrTag(0x2cd, 4, 0x321)) {
             config['components']['climate']['swing_modes'] = ['1', '2', '3', '4', '5', '6', 'on', 'off']
             this.addField(config, {
