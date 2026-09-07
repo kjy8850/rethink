@@ -445,74 +445,79 @@ export default class Device extends TLVDevice {
         })
 
         /*
-         * Ceiling cassettes report the vane on a different set of tags from the wall units this
-         * file was written for, and 0x321 carries something else there: on a CST_570004_WW it
-         * sits at 0x222x and barely moves, so the 0x321 handler below reads it as an index past
-         * the end of its table and publishes nothing at all -- the swing mode shows as unknown.
+         * A ceiling cassette drives its vane from tags this file did not model, and 0x321 does
+         * not mean on one what it means on the wall units it was written for: there it is the
+         * whole swing mode, here it sits at 0x222x, so the 0x321 handler below indexes past the
+         * end of its table and publishes nothing -- the swing mode reads as unknown.
          *
-         * Observed on the appliance, one control at a time:
-         *   0x180  vane position, (raw >> 8) & 0xf stepping 1..6 as the position is moved
-         *   0x102  vertical swing, 100 on / 32 off  (100 is the cloud's own value for swinging)
-         *   0x100  horizontal swing, in bits 0x30
-         * which is exactly what the ThinQ app offers for one of these: an up/down position with
-         * a swing toggle under it, and a swing toggle alone for left-right with no position.
+         * Watched on the appliance while each control was pressed on its own, twice over:
+         *   0x321  vane position in the low nibble, 1..6
+         *   0x205  vertical swing, 0/1   (toggled 8 times, then again 8 times)
+         *   0x206  horizontal swing, 0/1 (toggled 10 times, then again 9 times)
+         * which is what the ThinQ app offers for one of these: an up/down position with a swing
+         * toggle under it, and for left-right a swing toggle alone with no position -- and is
+         * why there is no 0x322 here.
          *
-         * Read-only for now: writing these is not yet worked out, and 0x100 carries other bits
-         * whose meaning is unknown, so a careless write there would change something unnamed.
+         * The position write keeps the bits above the nibble as the appliance last reported
+         * them; they are the same 0x222 in every packet seen and nothing here knows what they
+         * carry, so they are preserved rather than zeroed.
          */
-        if (this.hasTag(0x180)) {
+        /*
+         * Both readings of 0x321 cannot be registered at once: addField keys on the tag id, so
+         * whichever runs last would win. A wall unit reports 0 to 6 or 100 there; a cassette
+         * reports 0x222x, so anything above a byte is the cassette form and the swing_mode
+         * handler further down is left to the wall units it was written for.
+         */
+        const vaneRaw = this.raw_clip_state[0x321]
+        const cassetteVane = vaneRaw !== undefined && vaneRaw > 0xff
+
+        if (cassetteVane) {
             const vane = {
-                platform: 'sensor',
+                platform: 'number',
                 unique_id: '$deviceid-vaneposition',
                 name: 'Vane position',
                 icon: 'mdi:air-conditioner',
-                state_class: 'measurement',
+                min: 1,
+                max: 6,
+                step: 1,
+                mode: 'slider',
+                entity_category: 'config',
             } as const
             config['components']['vaneposition'] = vane
             this.addField(config, {
-                id: 0x180,
+                id: 0x321,
                 name: '',
                 comp: 'vaneposition',
-                writable: false,
-                read_xform: (raw) => (raw >> 8) & 0x0f,
+                read_xform: (raw) => Number(raw) & 0x0f,
+                write_xform: (val) => ((this.raw_clip_state[0x321] ?? 0) & ~0x0f) | (Number(val) & 0x0f),
             })
         }
 
-        if (this.hasTag(0x102)) {
-            const sv = {
-                platform: 'binary_sensor',
-                unique_id: '$deviceid-swingvertical',
-                name: 'Vertical swing',
-                icon: 'mdi:arrow-up-down',
+        for (const [tag, name, desc, icon] of [
+            [0x205, 'swingvertical', 'Vertical swing', 'mdi:arrow-up-down'],
+            [0x206, 'swinghorizontal', 'Horizontal swing', 'mdi:arrow-left-right'],
+        ] as const) {
+            if (!this.hasTag(tag)) continue
+
+            const sw = {
+                platform: 'switch',
+                unique_id: '$deviceid-' + name,
+                name: desc,
+                icon: icon,
+                entity_category: 'config',
+                optimistic: true,
             } as const
-            config['components']['swingvertical'] = sv
+            config['components'][name] = sw
             this.addField(config, {
-                id: 0x102,
+                id: tag,
                 name: '',
-                comp: 'swingvertical',
-                writable: false,
-                read_xform: (raw) => (raw === 100 ? 'ON' : 'OFF'),
+                comp: name,
+                read_xform: (raw) => (raw ? 'ON' : 'OFF'),
+                write_xform: (val) => (val === 'ON' ? 1 : 0),
             })
         }
 
-        if (this.hasTag(0x100)) {
-            const sh = {
-                platform: 'binary_sensor',
-                unique_id: '$deviceid-swinghorizontal',
-                name: 'Horizontal swing',
-                icon: 'mdi:arrow-left-right',
-            } as const
-            config['components']['swinghorizontal'] = sh
-            this.addField(config, {
-                id: 0x100,
-                name: '',
-                comp: 'swinghorizontal',
-                writable: false,
-                read_xform: (raw) => (raw & 0x30 ? 'ON' : 'OFF'),
-            })
-        }
-
-        if (this.hasCapOrTag(0x2cd, 4, 0x321)) {
+        if (!cassetteVane && this.hasCapOrTag(0x2cd, 4, 0x321)) {
             config['components']['climate']['swing_modes'] = ['1', '2', '3', '4', '5', '6', 'on', 'off']
             this.addField(config, {
                 id: 0x321,
