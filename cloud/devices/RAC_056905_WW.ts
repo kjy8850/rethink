@@ -464,12 +464,13 @@ export default class Device extends TLVDevice {
          */
         /*
          * Both readings of 0x321 cannot be registered at once: addField keys on the tag id, so
-         * whichever runs last would win. A wall unit reports 0 to 6 or 100 there; a cassette
-         * reports 0x222x, so anything above a byte is the cassette form and the swing_mode
-         * handler further down is left to the wall units it was written for.
+         * whichever runs last would win. A cassette is told apart by reporting 0x205 at all --
+         * a wall unit does not have it, and unlike the shape of 0x321 it is there whatever the
+         * vane is doing. Reading 0x321 as "above a byte means cassette" looked equivalent and
+         * is not: one of the four here sits at 0 with its vane shut, and was left with the wall
+         * unit's swing_mode and no vane entities at all.
          */
-        const vaneRaw = this.raw_clip_state[0x321]
-        const cassetteVane = vaneRaw !== undefined && vaneRaw > 0xff
+        const cassetteVane = this.hasTag(0x205)
 
         if (cassetteVane) {
             const vane = {
