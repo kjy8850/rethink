@@ -206,6 +206,23 @@ export function app(ha: HA_bridge, manager: DeviceManager, bridge: Bridge | unde
             }),
         )
 
+        // Read-only: GET any ThinQ path, eg. /bridge/thinq?path=service/homes/{homeId}/group-types
+        app.get(
+            '/bridge/thinq',
+            asyncHandler(async (req, res) => {
+                const path = typeof req.query.path === 'string' ? req.query.path : undefined
+                if (!path) {
+                    res.status(400).end('path query parameter is required')
+                    return
+                }
+                try {
+                    res.json(await bridge.inspectPath(path))
+                } catch (err) {
+                    res.status(500).end(`${err}`)
+                }
+            }),
+        )
+
         app.get(
             '/bridge/inspect/:deviceId',
             asyncHandler(async (req, res) => {

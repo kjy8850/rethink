@@ -291,6 +291,16 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
         return await client.getHome()
     }
 
+    // GET an arbitrary ThinQ path. See ThinqClient.getAny() for why; read-only.
+    async inspectPath(path: string) {
+        const creds = this.state.getCredentials()
+        if (!creds) throw new Error('Not logged in')
+
+        const client = new ThinqClient(creds.env)
+        await client.auth(creds.refreshToken)
+        return await client.getAny(path)
+    }
+
     isLoggedIn() {
         return !!this.state.getCredentials()
     }

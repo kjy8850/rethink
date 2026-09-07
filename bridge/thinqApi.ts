@@ -215,6 +215,24 @@ export class Client {
         return await apiFetch<unknown>(`${thinq2Uri}/service/homes/${this.homeId}`, { headers: this.headers })
     }
 
+    /*
+     * GET any path under thinq2Uri. Read-only by construction: no method other than GET is issued.
+     *
+     * The ThinQ app addresses a much larger API than rethink models -- among it
+     * service/homes/{homeId}/group-types, service/groups and
+     * service/homes/{homeId}/devices/{groupType}. A WashTower is stored as a group of
+     * type "kepler", and addDevice() (which posts a single appliance to
+     * service/homes/{homeId}/devices) is refused for it, so the group endpoints are where an
+     * answer would be. This exists to read them without a release per URL.
+     */
+    async getAny(path: string) {
+        if (/:\/\/|\.\./.test(path)) throw new Error('Path must stay under the ThinQ service root')
+
+        const { thinq2Uri } = await this.gateway
+        const clean = path.replace(/^\/+/, '').replace('{homeId}', this.homeId ?? '')
+        return await apiFetch<unknown>(`${thinq2Uri}/${clean}`, { headers: this.headers })
+    }
+
     async removeDevice(deviceId: string) {
         if (!this.homeId) throw new Error('Current home is not set')
 
