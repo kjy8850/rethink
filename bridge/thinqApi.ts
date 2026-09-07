@@ -121,6 +121,26 @@ export type SubDeviceRegistration = {
     modemVer?: string
 }
 
+/*
+ * The fields beyond the eight rethink has always sent that the ThinQ app also fills in. A
+ * single appliance registers without them; a combined product answered '0005' without a
+ * subDevice and then '9999' with one, so the rest of the app's body is the next thing to
+ * match. Every value here is read back from the cloud's own record of the appliance rather
+ * than invented, so nothing is asserted that the account does not already hold.
+ */
+export type RegistrationExtras = {
+    deviceCode?: string
+    modemVer?: string
+    ssid?: string
+    timezoneCode?: string
+    regIndex?: number
+    salesModelName?: string
+    serialNo?: string
+    demandType?: string
+    networkType?: string
+    subModelNm?: string
+}
+
 export class Client {
     headers: Record<string, string> = {
         'content-type': 'application/json;charset=UTF-8',
@@ -289,6 +309,7 @@ export class Client {
         deviceType: string,
         ciphertext?: Buffer,
         subDevice?: SubDeviceRegistration,
+        extras?: RegistrationExtras,
     ) {
         if (!this.homeId) throw new Error('Current home is not set')
 
@@ -311,6 +332,7 @@ export class Client {
              * undocumented '0005' (anszom/rethink#79).
              */
             ...(subDevice ? { subDevice } : {}),
+            ...(extras ?? {}),
         }
 
         try {
@@ -343,6 +365,15 @@ export class Client {
             if (err instanceof RemoteError && err.resultCode === ErrorCodes.ERROR_ALREADY_DEVICES_REGISTERED_IN_HOME) {
                 console.log('Device already registered, keeping the existing registration')
             } else {
+                if (err instanceof RemoteError) {
+                    // Say which code came back and what the body carried; a bare rethrow loses both,
+                    // and these registrations fail with codes the ErrorCodes table does not explain.
+                    console.log(
+                        `addDevice for ${device.deviceId} failed with '${err.resultCode}' ` +
+                            `(${ErrorStrings[err.resultCode] ?? 'unlisted'}): ${JSON.stringify(err.result)}`,
+                    )
+                    console.log(`  request body was: ${JSON.stringify(body)}`)
+                }
                 throw err
             }
         }

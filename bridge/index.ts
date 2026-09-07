@@ -328,18 +328,48 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
             return { t2, ciphertext }
         }
 
+        /*
+         * The app sends far more than the eight fields rethink has always sent. Read the rest
+         * back from the cloud's own record of each appliance rather than inventing them: this
+         * asserts nothing the account does not already hold, and leaves out anything missing.
+         */
+        const home = (await client.getHome()) as { devices?: Record<string, unknown>[] }
+        const recordFor = (id: string) => home.devices?.find((d) => d.deviceId === id) ?? {}
+        const extrasFor = (id: string) => {
+            const r = recordFor(id) as Record<string, unknown>
+            const pick = (k: string) => (typeof r[k] === 'string' && r[k] ? (r[k] as string) : undefined)
+            return {
+                deviceCode: pick('deviceCode'),
+                modemVer: pick('modemVer'),
+                ssid: pick('ssid'),
+                timezoneCode: pick('timezoneCode'),
+                demandType: pick('demandType'),
+                networkType: pick('networkType'),
+                regIndex: typeof r.regIndex === 'number' ? r.regIndex : 0,
+            }
+        }
+
         const m = await pairOne(master)
         const s = await pairOne(slave)
+        const slaveExtras = extrasFor(slave.id)
 
         statusCallback('Adding the pair to the home')
-        await client.addDevice(m.t2, this.resolveAlias(master.id), master.meta.deviceType!, m.ciphertext, {
-            deviceId: slave.id,
-            deviceType: slave.meta.deviceType!,
-            modelName: slave.meta.modelName,
-            aliasPrefix: this.resolveAlias(slave.id),
-            ciphertext: s.ciphertext.toString('base64'),
-            regIndex: 0,
-        })
+        await client.addDevice(
+            m.t2,
+            this.resolveAlias(master.id),
+            master.meta.deviceType!,
+            m.ciphertext,
+            {
+                deviceId: slave.id,
+                deviceType: slave.meta.deviceType!,
+                modelName: slave.meta.modelName,
+                aliasPrefix: this.resolveAlias(slave.id),
+                ciphertext: s.ciphertext.toString('base64'),
+                regIndex: slaveExtras.regIndex,
+                modemVer: slaveExtras.modemVer,
+            },
+            extrasFor(master.id),
+        )
 
         // Bridge both halves on the credentials pair() just issued.
         for (const [dev, paired] of [
