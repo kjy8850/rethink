@@ -206,6 +206,19 @@ export function app(ha: HA_bridge, manager: DeviceManager, bridge: Bridge | unde
             }),
         )
 
+        // Register a combined product (both halves of a WashTower) in one call.
+        app.post(
+            '/bridge/combined/:masterId/:slaveId',
+            asyncHandler(async (req, res) => {
+                try {
+                    await bridge.registerCombined(req.params.masterId, req.params.slaveId, statusReport)
+                    res.status(204).end()
+                } catch (err) {
+                    res.status(500).end(`${err}`)
+                }
+            }),
+        )
+
         // Read-only: GET any ThinQ path, eg. /bridge/thinq?path=service/homes/{homeId}/group-types
         app.get(
             '/bridge/thinq',

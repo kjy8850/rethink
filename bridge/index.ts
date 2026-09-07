@@ -291,6 +291,72 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
         return await client.getHome()
     }
 
+    /*
+     * Register a combined product -- both halves of a WashTower in one call.
+     *
+     * The cloud stores the pair as a group of type "kepler" with one member flagged masterYn,
+     * and refuses either half registered on its own with the undocumented '0005'. The ThinQ
+     * app's RegisterDeviceRequestBody carries the other half in a subDevice field, so that is
+     * what this builds: pair() each appliance for its own ciphertext, then one addDevice with
+     * the master in the body and the slave nested.
+     *
+     * Both devices are bridged afterwards, so the caller does not enable them separately.
+     */
+    async registerCombined(masterId: string, slaveId: string, statusCallback: StatusCallback = () => {}) {
+        const creds = this.state.getCredentials()
+        if (!creds) throw new Error('Not logged in')
+
+        const master = this.manager.allDevices[masterId]
+        const slave = this.manager.allDevices[slaveId]
+        if (!master || !slave) throw new Error('Both appliances must be known to rethink')
+        if (master.platform !== 'thinq2' || slave.platform !== 'thinq2')
+            throw new Error('Combined registration is thinq2 only')
+
+        const client = new ThinqClient(creds.env)
+        await client.auth(creds.refreshToken)
+
+        // Each half needs a certificate of its own; the ciphertext proves possession per device.
+        const pairOne = async (dev: AnyDevice) => {
+            statusCallback(`Pairing ${dev.id}`)
+            const otp = await client.prepareNewT2Device()
+            const t2 = new Thinq2Device(dev.id, dev.meta)
+            const ciphertext = await t2.pair(client.env, otp)
+            if (t2.state && dev instanceof T2Downstream) {
+                t2.state.deployAppInfo = dev.deployAppInfo
+                t2.state.deployPlatformInfo = dev.deployPlatformInfo
+            }
+            return { t2, ciphertext }
+        }
+
+        const m = await pairOne(master)
+        const s = await pairOne(slave)
+
+        statusCallback('Adding the pair to the home')
+        await client.addDevice(m.t2, this.resolveAlias(master.id), master.meta.deviceType!, m.ciphertext, {
+            deviceId: slave.id,
+            deviceType: slave.meta.deviceType!,
+            modelName: slave.meta.modelName,
+            aliasPrefix: this.resolveAlias(slave.id),
+            ciphertext: s.ciphertext.toString('base64'),
+            regIndex: 0,
+        })
+
+        // Bridge both halves on the credentials pair() just issued.
+        for (const [dev, paired] of [
+            [master, m],
+            [slave, s],
+        ] as const) {
+            this.#stop(dev.id)
+            this.state.setDeviceState(dev.id, paired.t2.state)
+            const bridged = new BridgedDevice(paired.t2, dev)
+            this.bridgedDevices.set(dev.id, bridged)
+            this.emit('started', dev.id)
+        }
+
+        statusCallback('Combined registration finished')
+        void this.refreshNames(client)
+    }
+
     // GET an arbitrary ThinQ path. See ThinqClient.getAny() for why; read-only.
     async inspectPath(path: string) {
         const creds = this.state.getCredentials()

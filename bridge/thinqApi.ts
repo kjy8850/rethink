@@ -106,6 +106,21 @@ export type Environment = {
     countryCode: string
 }
 
+/*
+ * The nested appliance in a combined-product registration, mirroring the ThinQ app's
+ * com.lgeha.nuts.registration.model.SubDevice: aliasPrefix, ciphertext, deviceId, deviceType,
+ * modelName, modemVer, regIndex.
+ */
+export type SubDeviceRegistration = {
+    deviceId: string
+    deviceType: string
+    modelName: string
+    aliasPrefix: string
+    ciphertext: string
+    regIndex: number
+    modemVer?: string
+}
+
 export class Client {
     headers: Record<string, string> = {
         'content-type': 'application/json;charset=UTF-8',
@@ -268,7 +283,13 @@ export class Client {
     // longer reach LG on its own. Bridging does not need a fresh registration - the credentials
     // come from pair(), which has already run by this point.
     // ciphertext is required for Thinq2 devices
-    async addDevice(device: Device, alias: string, deviceType: string, ciphertext?: Buffer) {
+    async addDevice(
+        device: Device,
+        alias: string,
+        deviceType: string,
+        ciphertext?: Buffer,
+        subDevice?: SubDeviceRegistration,
+    ) {
         if (!this.homeId) throw new Error('Current home is not set')
 
         const { thinq2Uri } = await this.gateway
@@ -281,6 +302,15 @@ export class Client {
             platformType: device.platformType,
             ciphertext: ciphertext ? ciphertext.toString('base64') : undefined,
             initDevice: false,
+            /*
+             * A combined product -- a WashTower, which the cloud stores as a group of type
+             * "kepler" -- is registered as one appliance carrying the other, not as two
+             * appliances. The ThinQ app's RegisterDeviceRequestBody has a subDevice field of
+             * type SubDevice for exactly this, and its code branches on "subDevice mandatory".
+             * Registering either half on its own is what the cloud refuses with the
+             * undocumented '0005' (anszom/rethink#79).
+             */
+            ...(subDevice ? { subDevice } : {}),
         }
 
         try {
