@@ -275,6 +275,22 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
         return { modelName: dev.meta.modelName, modelJson: await client.getModelJson(id, dev.meta.modelName) }
     }
 
+    /*
+     * Read-only views of what the ThinQ cloud stores, for diagnosing a registration the cloud
+     * refuses without saying why (addDevice answers '0005' with an empty body for a WashTower).
+     * Neither call changes anything in the account.
+     */
+    async inspect(deviceId?: string) {
+        const creds = this.state.getCredentials()
+        if (!creds) throw new Error('Not logged in')
+
+        const client = new ThinqClient(creds.env)
+        await client.auth(creds.refreshToken)
+
+        if (deviceId) return await client.getDeviceStatus(deviceId)
+        return await client.getHome()
+    }
+
     isLoggedIn() {
         return !!this.state.getCredentials()
     }

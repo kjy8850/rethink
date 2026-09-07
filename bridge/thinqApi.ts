@@ -200,6 +200,21 @@ export class Client {
         return home.devices
     }
 
+    /*
+     * The whole home record, not just the deviceId/alias pair listDevices() keeps.
+     *
+     * addDevice() is refused with an undocumented '0005' and an empty body for both halves of a
+     * WashTower, so there is nothing in the failure itself to read. What the cloud already stores
+     * about those two appliances is the next best thing: if the pair is modelled as a group, the
+     * shape of it shows up here. Read-only.
+     */
+    async getHome() {
+        if (!this.homeId) throw new Error('Current home is not set')
+
+        const { thinq2Uri } = await this.gateway
+        return await apiFetch<unknown>(`${thinq2Uri}/service/homes/${this.homeId}`, { headers: this.headers })
+    }
+
     async removeDevice(deviceId: string) {
         if (!this.homeId) throw new Error('Current home is not set')
 

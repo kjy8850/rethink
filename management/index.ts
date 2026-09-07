@@ -193,6 +193,30 @@ export function app(ha: HA_bridge, manager: DeviceManager, bridge: Bridge | unde
             }),
         )
 
+        // Read-only: what the ThinQ cloud stores about the home, or about one appliance.
+        // '/bridge/inspect' is the home record; '/bridge/inspect/:deviceId' is one device.
+        app.get(
+            '/bridge/inspect',
+            asyncHandler(async (req, res) => {
+                try {
+                    res.json(await bridge.inspect())
+                } catch (err) {
+                    res.status(500).end(`${err}`)
+                }
+            }),
+        )
+
+        app.get(
+            '/bridge/inspect/:deviceId',
+            asyncHandler(async (req, res) => {
+                try {
+                    res.json(await bridge.inspect(req.params.deviceId))
+                } catch (err) {
+                    res.status(500).end(`${err}`)
+                }
+            }),
+        )
+
         app.post(
             '/bridge/:deviceId/disable',
             asyncHandler(async (req, res) => {
