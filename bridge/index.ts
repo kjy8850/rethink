@@ -345,7 +345,9 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
                 timezoneCode: pick('timezoneCode'),
                 demandType: pick('demandType'),
                 networkType: pick('networkType'),
-                regIndex: typeof r.regIndex === 'number' ? r.regIndex : 0,
+                // regIndex is a String in the app's model, so send it as one whatever the
+                // cloud's own record types it as.
+                regIndex: r.regIndex === undefined || r.regIndex === null ? '0' : String(r.regIndex),
             }
         }
 

@@ -111,13 +111,19 @@ export type Environment = {
  * com.lgeha.nuts.registration.model.SubDevice: aliasPrefix, ciphertext, deviceId, deviceType,
  * modelName, modemVer, regIndex.
  */
+/*
+ * Field types follow the app's class exactly: regIndex is a String there, not a number, and
+ * RegisterDeviceRequestBody.subDevice is a List, not a single object. Sending an object where
+ * a list belongs, or a number where a string belongs, is enough for the cloud to fail
+ * deserialization and answer with a bare '9999' and an empty body.
+ */
 export type SubDeviceRegistration = {
     deviceId: string
     deviceType: string
     modelName: string
     aliasPrefix: string
     ciphertext: string
-    regIndex: number
+    regIndex: string
     modemVer?: string
 }
 
@@ -133,7 +139,7 @@ export type RegistrationExtras = {
     modemVer?: string
     ssid?: string
     timezoneCode?: string
-    regIndex?: number
+    regIndex?: string
     salesModelName?: string
     serialNo?: string
     demandType?: string
@@ -331,7 +337,7 @@ export class Client {
              * Registering either half on its own is what the cloud refuses with the
              * undocumented '0005' (anszom/rethink#79).
              */
-            ...(subDevice ? { subDevice } : {}),
+            ...(subDevice ? { subDevice: [subDevice] } : {}),
             ...(extras ?? {}),
         }
 
