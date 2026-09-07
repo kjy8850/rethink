@@ -391,12 +391,68 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
 
     // GET an arbitrary ThinQ path. See ThinqClient.getAny() for why; read-only.
     async inspectPath(path: string) {
+        return await this.callThinq('GET', path)
+    }
+
+    /*
+     * Issue one arbitrary ThinQ request. Debugging tool -- see ThinqClient.callAny().
+     *
+     * Also mints a fresh certificate per device id in `pairFor`, substituting each one's
+     * ciphertext into the body under `$ciphertext:<deviceId>`. The proof is bound to the csr
+     * and public key generated at that moment, so it cannot be prepared ahead of time by the
+     * caller; the resulting Thinq2Device states are kept so a successful registration can be
+     * bridged straight after.
+     */
+    async callThinq(method: string, path: string, body?: unknown, pairFor: string[] = []) {
         const creds = this.state.getCredentials()
         if (!creds) throw new Error('Not logged in')
 
         const client = new ThinqClient(creds.env)
         await client.auth(creds.refreshToken)
-        return await client.getAny(path)
+
+        const paired = new Map<string, Thinq2Device>()
+        for (const id of pairFor) {
+            const dev = this.manager.allDevices[id]
+            if (!dev) throw new Error(`Unknown device ${id}`)
+            const otp = await client.prepareNewT2Device()
+            const t2 = new Thinq2Device(dev.id, dev.meta)
+            const ciphertext = await t2.pair(client.env, otp)
+            if (t2.state && dev instanceof T2Downstream) {
+                t2.state.deployAppInfo = dev.deployAppInfo
+                t2.state.deployPlatformInfo = dev.deployPlatformInfo
+            }
+            paired.set(id, t2)
+            this.lastPaired.set(id, { device: t2, ciphertext: ciphertext.toString('base64') })
+        }
+
+        const substituted =
+            body === undefined
+                ? undefined
+                : JSON.parse(
+                      JSON.stringify(body).replace(/\$ciphertext:([0-9a-f-]+)/g, (_m, id: string) => {
+                          const p = this.lastPaired.get(id)
+                          if (!p) throw new Error(`No certificate was minted for ${id}`)
+                          return p.ciphertext
+                      }),
+                  )
+
+        return await client.callAny(method, path, substituted)
+    }
+
+    // Certificates minted by the most recent callThinq(), so a registration that the cloud
+    // accepts can be bridged without pairing again.
+    lastPaired = new Map<string, { device: Thinq2Device; ciphertext: string }>()
+
+    // Bridge a device on the certificate callThinq() last minted for it.
+    bridgeLastPaired(id: string) {
+        const p = this.lastPaired.get(id)
+        const dev = this.manager.allDevices[id]
+        if (!p || !dev) throw new Error(`No pending certificate for ${id}`)
+
+        this.#stop(id)
+        this.state.setDeviceState(id, p.device.state)
+        this.bridgedDevices.set(id, new BridgedDevice(p.device, dev))
+        this.emit('started', id)
     }
 
     isLoggedIn() {

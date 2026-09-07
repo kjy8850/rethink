@@ -267,11 +267,27 @@ export class Client {
      * answer would be. This exists to read them without a release per URL.
      */
     async getAny(path: string) {
+        return await this.callAny('GET', path)
+    }
+
+    /*
+     * Issue one request against thinq2Uri with a body of the caller's choosing.
+     *
+     * Working out what the cloud wants for a combined product is a matter of trying a request,
+     * reading the code it comes back with, and adjusting -- which is not worth a release per
+     * attempt. This is a debugging tool: it can reach destructive endpoints (devices/delete
+     * among them), so the caller is responsible for what it sends.
+     */
+    async callAny(method: string, path: string, body?: unknown) {
         if (/:\/\/|\.\./.test(path)) throw new Error('Path must stay under the ThinQ service root')
 
         const { thinq2Uri } = await this.gateway
         const clean = path.replace(/^\/+/, '').replace('{homeId}', this.homeId ?? '')
-        return await apiFetch<unknown>(`${thinq2Uri}/${clean}`, { headers: this.headers })
+        return await apiFetch<unknown>(`${thinq2Uri}/${clean}`, {
+            headers: this.headers,
+            method,
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
     }
 
     async removeDevice(deviceId: string) {

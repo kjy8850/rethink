@@ -206,6 +206,46 @@ export function app(ha: HA_bridge, manager: DeviceManager, bridge: Bridge | unde
             }),
         )
 
+        /*
+         * Issue one arbitrary ThinQ request. Debugging tool for working out what the cloud wants
+         * from a combined-product registration without a release per attempt; it can reach
+         * destructive endpoints, so what it sends is the caller's responsibility.
+         *
+         * { method, path, body, pairFor: [deviceId...] } -- each id in pairFor gets a fresh
+         * certificate whose proof replaces "$ciphertext:<deviceId>" wherever it appears in body.
+         */
+        app.post(
+            '/bridge/call',
+            asyncHandler(async (req, res) => {
+                const { method, path, body, pairFor } = req.body ?? {}
+                if (typeof method !== 'string' || typeof path !== 'string') {
+                    res.status(400).end('method and path are required')
+                    return
+                }
+                try {
+                    res.json({
+                        ok: true,
+                        result: await bridge.callThinq(method, path, body, Array.isArray(pairFor) ? pairFor : []),
+                    })
+                } catch (err) {
+                    res.json({ ok: false, error: `${err}` })
+                }
+            }),
+        )
+
+        // Bridge a device on the certificate /bridge/call last minted for it.
+        app.post(
+            '/bridge/adopt/:deviceId',
+            asyncHandler(async (req, res) => {
+                try {
+                    bridge.bridgeLastPaired(req.params.deviceId)
+                    res.status(204).end()
+                } catch (err) {
+                    res.status(500).end(`${err}`)
+                }
+            }),
+        )
+
         // Register a combined product (both halves of a WashTower) in one call.
         app.post(
             '/bridge/combined/:masterId/:slaveId',
