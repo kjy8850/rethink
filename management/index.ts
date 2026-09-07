@@ -246,12 +246,23 @@ export function app(ha: HA_bridge, manager: DeviceManager, bridge: Bridge | unde
             }),
         )
 
-        // Register a combined product (both halves of a WashTower) in one call.
+        /*
+         * Register a combined product -- a WashTower's washer and dryer -- in one call, and
+         * bridge both. Body: { deviceIds: [...], groupType?, registrationType? }.
+         *
+         * The cloud refuses either half on its own through the ordinary device endpoint; see
+         * Bridge.registerCombined().
+         */
         app.post(
-            '/bridge/combined/:masterId/:slaveId',
+            '/bridge/combined',
             asyncHandler(async (req, res) => {
+                const { deviceIds, groupType, registrationType } = req.body ?? {}
+                if (!Array.isArray(deviceIds) || deviceIds.length < 2) {
+                    res.status(400).end('deviceIds must list at least two appliances')
+                    return
+                }
                 try {
-                    await bridge.registerCombined(req.params.masterId, req.params.slaveId, statusReport)
+                    await bridge.registerCombined(deviceIds, groupType, registrationType, statusReport)
                     res.status(204).end()
                 } catch (err) {
                     res.status(500).end(`${err}`)

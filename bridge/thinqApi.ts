@@ -112,19 +112,26 @@ export type Environment = {
  * modelName, modemVer, regIndex.
  */
 /*
- * Field types follow the app's class exactly: regIndex is a String there, not a number, and
- * RegisterDeviceRequestBody.subDevice is a List, not a single object. Sending an object where
- * a list belongs, or a number where a string belongs, is enough for the cloud to fail
+ * One appliance inside a combined-product registration.
+ *
+ * Field types follow the ThinQ app's classes exactly: regIndex is a String there, not a
+ * number. Sending a number where a string belongs is enough for the cloud to fail
  * deserialization and answer with a bare '9999' and an empty body.
  */
-export type SubDeviceRegistration = {
+export type ComboDeviceItem = {
     deviceId: string
+    countryCode: string
     deviceType: string
     modelName: string
     aliasPrefix: string
+    platformType: string
     ciphertext: string
+    initDevice: boolean
     regIndex: string
+    deviceCode?: string
     modemVer?: string
+    ssid?: string
+    timezoneCode?: string
 }
 
 /*
@@ -290,6 +297,31 @@ export class Client {
         })
     }
 
+    /*
+     * Register a combined product -- a WashTower, which the cloud stores as one group with a
+     * member each for the washer and the dryer.
+     *
+     * This is a different endpoint and a different body from addDevice(), which is why
+     * registering either half on its own has always been refused with the undocumented '0005'
+     * (anszom/rethink#79). The ThinQ app calls postRegisterComboProductWithHome ->
+     * POST service/homes/{homeId}/devices/{groupType} with a
+     * RegisterComboDeviceRequestBody: { registrationType, item: [...] } -- both appliances side
+     * by side in one list, not one nested inside the other.
+     *
+     * groupType is the group's `type` as the cloud reports it in the home record; "kepler" is
+     * the app's own name for a WashTower (see its GROUP_TYPE_KEPLER constant).
+     */
+    async addComboDevices(items: ComboDeviceItem[], groupType: string, registrationType: string) {
+        if (!this.homeId) throw new Error('Current home is not set')
+
+        const { thinq2Uri } = await this.gateway
+        await apiFetch(`${thinq2Uri}/service/homes/${this.homeId}/devices/${groupType}`, {
+            headers: this.headers,
+            method: 'POST',
+            body: JSON.stringify({ registrationType, item: items }),
+        })
+    }
+
     async removeDevice(deviceId: string) {
         if (!this.homeId) throw new Error('Current home is not set')
 
@@ -325,14 +357,7 @@ export class Client {
     // longer reach LG on its own. Bridging does not need a fresh registration - the credentials
     // come from pair(), which has already run by this point.
     // ciphertext is required for Thinq2 devices
-    async addDevice(
-        device: Device,
-        alias: string,
-        deviceType: string,
-        ciphertext?: Buffer,
-        subDevice?: SubDeviceRegistration,
-        extras?: RegistrationExtras,
-    ) {
+    async addDevice(device: Device, alias: string, deviceType: string, ciphertext?: Buffer) {
         if (!this.homeId) throw new Error('Current home is not set')
 
         const { thinq2Uri } = await this.gateway
@@ -345,16 +370,6 @@ export class Client {
             platformType: device.platformType,
             ciphertext: ciphertext ? ciphertext.toString('base64') : undefined,
             initDevice: false,
-            /*
-             * A combined product -- a WashTower, which the cloud stores as a group of type
-             * "kepler" -- is registered as one appliance carrying the other, not as two
-             * appliances. The ThinQ app's RegisterDeviceRequestBody has a subDevice field of
-             * type SubDevice for exactly this, and its code branches on "subDevice mandatory".
-             * Registering either half on its own is what the cloud refuses with the
-             * undocumented '0005' (anszom/rethink#79).
-             */
-            ...(subDevice ? { subDevice: [subDevice] } : {}),
-            ...(extras ?? {}),
         }
 
         try {

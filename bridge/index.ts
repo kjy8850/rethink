@@ -292,31 +292,48 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
     }
 
     /*
-     * Register a combined product -- both halves of a WashTower in one call.
+     * Register a combined product -- both halves of a WashTower -- and bridge them.
      *
-     * The cloud stores the pair as a group of type "kepler" with one member flagged masterYn,
-     * and refuses either half registered on its own with the undocumented '0005'. The ThinQ
-     * app's RegisterDeviceRequestBody carries the other half in a subDevice field, so that is
-     * what this builds: pair() each appliance for its own ciphertext, then one addDevice with
-     * the master in the body and the slave nested.
+     * The cloud keeps such a pair as one group (type "kepler" for a WashTower) and refuses
+     * either half registered on its own through addDevice with the undocumented '0005'. The
+     * app uses a different endpoint and body for these: POST
+     * service/homes/{homeId}/devices/{groupType} with { registrationType, item: [...] },
+     * listing both appliances side by side. Verified against the cloud: registering the pair
+     * this way clears the registrationFailCode the failed single registrations had left set.
      *
-     * Both devices are bridged afterwards, so the caller does not enable them separately.
+     * Each appliance still needs a certificate of its own, so pair() runs for both first.
+     * Both are bridged afterwards; the caller does not enable them separately.
      */
-    async registerCombined(masterId: string, slaveId: string, statusCallback: StatusCallback = () => {}) {
+    async registerCombined(
+        deviceIds: string[],
+        groupType = 'kepler',
+        registrationType = 'REGISTRATION_TYPE_WIFI_NORMAL',
+        statusCallback: StatusCallback = () => {},
+    ) {
         const creds = this.state.getCredentials()
         if (!creds) throw new Error('Not logged in')
+        if (deviceIds.length < 2) throw new Error('A combined product needs at least two appliances')
 
-        const master = this.manager.allDevices[masterId]
-        const slave = this.manager.allDevices[slaveId]
-        if (!master || !slave) throw new Error('Both appliances must be known to rethink')
-        if (master.platform !== 'thinq2' || slave.platform !== 'thinq2')
-            throw new Error('Combined registration is thinq2 only')
+        const devices = deviceIds.map((id) => {
+            const dev = this.manager.allDevices[id]
+            if (!dev) throw new Error(`Unknown device ${id}`)
+            if (dev.platform !== 'thinq2') throw new Error(`${id} is not a thinq2 device`)
+            return dev
+        })
 
         const client = new ThinqClient(creds.env)
         await client.auth(creds.refreshToken)
 
-        // Each half needs a certificate of its own; the ciphertext proves possession per device.
-        const pairOne = async (dev: AnyDevice) => {
+        /*
+         * The app sends more per appliance than addDevice ever did. Read the extra values back
+         * from the cloud's own record rather than inventing them, and leave out what is absent.
+         */
+        const home = (await client.getHome()) as { devices?: Record<string, unknown>[] }
+        const recordFor = (id: string) =>
+            (home.devices?.find((d) => d.deviceId === id) ?? {}) as Record<string, unknown>
+
+        const paired = []
+        for (const dev of devices) {
             statusCallback(`Pairing ${dev.id}`)
             const otp = await client.prepareNewT2Device()
             const t2 = new Thinq2Device(dev.id, dev.meta)
@@ -325,63 +342,37 @@ export class Bridge extends TypedEmitter<BridgeEvents> {
                 t2.state.deployAppInfo = dev.deployAppInfo
                 t2.state.deployPlatformInfo = dev.deployPlatformInfo
             }
-            return { t2, ciphertext }
+            paired.push({ dev, t2, ciphertext })
         }
 
-        /*
-         * The app sends far more than the eight fields rethink has always sent. Read the rest
-         * back from the cloud's own record of each appliance rather than inventing them: this
-         * asserts nothing the account does not already hold, and leaves out anything missing.
-         */
-        const home = (await client.getHome()) as { devices?: Record<string, unknown>[] }
-        const recordFor = (id: string) => home.devices?.find((d) => d.deviceId === id) ?? {}
-        const extrasFor = (id: string) => {
-            const r = recordFor(id) as Record<string, unknown>
+        const items = paired.map(({ dev, ciphertext }, i) => {
+            const r = recordFor(dev.id)
             const pick = (k: string) => (typeof r[k] === 'string' && r[k] ? (r[k] as string) : undefined)
             return {
+                deviceId: dev.id,
+                countryCode: client.env.countryCode,
+                deviceType: dev.meta.deviceType!,
+                modelName: dev.meta.modelName,
+                aliasPrefix: this.resolveAlias(dev.id),
+                platformType: dev.platform,
+                ciphertext: ciphertext.toString('base64'),
+                initDevice: false,
+                // regIndex is a String in the app's model, and numbers the members of the group.
+                regIndex: String(i),
                 deviceCode: pick('deviceCode'),
                 modemVer: pick('modemVer'),
                 ssid: pick('ssid'),
                 timezoneCode: pick('timezoneCode'),
-                demandType: pick('demandType'),
-                networkType: pick('networkType'),
-                // regIndex is a String in the app's model, so send it as one whatever the
-                // cloud's own record types it as.
-                regIndex: r.regIndex === undefined || r.regIndex === null ? '0' : String(r.regIndex),
             }
-        }
+        })
 
-        const m = await pairOne(master)
-        const s = await pairOne(slave)
-        const slaveExtras = extrasFor(slave.id)
+        statusCallback('Registering the combined product')
+        await client.addComboDevices(items, groupType, registrationType)
 
-        statusCallback('Adding the pair to the home')
-        await client.addDevice(
-            m.t2,
-            this.resolveAlias(master.id),
-            master.meta.deviceType!,
-            m.ciphertext,
-            {
-                deviceId: slave.id,
-                deviceType: slave.meta.deviceType!,
-                modelName: slave.meta.modelName,
-                aliasPrefix: this.resolveAlias(slave.id),
-                ciphertext: s.ciphertext.toString('base64'),
-                regIndex: slaveExtras.regIndex,
-                modemVer: slaveExtras.modemVer,
-            },
-            extrasFor(master.id),
-        )
-
-        // Bridge both halves on the credentials pair() just issued.
-        for (const [dev, paired] of [
-            [master, m],
-            [slave, s],
-        ] as const) {
+        for (const { dev, t2 } of paired) {
             this.#stop(dev.id)
-            this.state.setDeviceState(dev.id, paired.t2.state)
-            const bridged = new BridgedDevice(paired.t2, dev)
-            this.bridgedDevices.set(dev.id, bridged)
+            this.state.setDeviceState(dev.id, t2.state)
+            this.bridgedDevices.set(dev.id, new BridgedDevice(t2, dev))
             this.emit('started', dev.id)
         }
 
