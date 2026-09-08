@@ -841,12 +841,19 @@ export default class Device extends AABBDevice {
         // Course (rsr byte[5]) with the downloaded course (rsr byte[20]) taking precedence,
         // same convention as H11. Every course value ever observed (0x08/0x10/0x12) is a real
         // modelJSON `Course` id, and 0x08/0x10 matched what was picked in the app.
+        // The course byte is cleared to 0 while powered off and during a cancel, which is a
+        // normal idle reading rather than an unrecognized code -- report it as NONE. (It is
+        // deliberately not in COURSES, since that map also supplies the selectable options.)
         const smartCourseCode = rsr[20]
         const baseCourseCode = rsr[5]
-        const courseStr =
-            smartCourseCode !== 0
-                ? SMART_COURSES[smartCourseCode] || `DOWNLOAD_COURSE(${smartCourseCode})`
-                : COURSES[baseCourseCode] || `UNKNOWN(${baseCourseCode})`
+        let courseStr: string
+        if (smartCourseCode !== 0) {
+            courseStr = SMART_COURSES[smartCourseCode] || `DOWNLOAD_COURSE(${smartCourseCode})`
+        } else if (baseCourseCode === 0) {
+            courseStr = 'NONE'
+        } else {
+            courseStr = COURSES[baseCourseCode] || `UNKNOWN(${baseCourseCode})`
+        }
         this.publishProperty('course', courseStr)
 
         // Initial / remaining / delay-start times, each an (hour, minute) pair.

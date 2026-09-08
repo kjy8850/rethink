@@ -97,6 +97,7 @@ describe('H07 status decoding', () => {
 
         const p = props(HA)
         assert.equal(p.process, 'CANCEL')
+        assert.equal(p.course, 'NONE') // the course byte is cleared while draining
         assert.equal(p.remain_time, 1) // 0:01, and the unit really does finish a minute later
         assert.equal(p.power, 'ON') // H11 would say OFF here; this unit is still awake
     })
