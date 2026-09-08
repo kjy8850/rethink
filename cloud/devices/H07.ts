@@ -27,21 +27,31 @@ import log from '@/util/logging'
  *   F0 26 14                                         -- resume         (4x)
  *   F0 26 16                                         -- power on/wake  (3x)
  *   F0 26 [Rinse][Softening][opt1][opt2][opt3] 00 00 00 -- settings    (28x)
+ *   F0 25 [Slot][00][BaseCourse][SmartCourse][00][00][opt3][opt4][00 x7]
+ *                                                    -- write one download slot (1x)
  *
- * These are the same opcodes H11.ts already sends, so the two models share the command layer as
- * well as the status layout. Two places where H07 differs from H11 and the difference is real:
+ * The F0 26 opcodes are the ones H11.ts already sends, so the two models share the command layer
+ * as well as the status layout. F0 25 has no H11 counterpart. Where H07 differs from H11:
  *   - settings opt1 bit 0x10 is the front time display (H11 has no bit there; H11's 0x08 is its
  *     clean reminder). Verified by A/B: toggling it in the app moved rsr[15] bit 0x08.
- *   - a downloaded (smart) course sets opt3 bit 0x80 on start, where H11 sets opt4 bit 0x40.
+ *   - a downloaded cycle is selected by SLOT in opt4 bits 5-6 (0x00/0x20/0x40 for slots 1/2/3),
+ *     not by any flag meaning "this is a download". Slot 3 kept 0x40 across a change of what it
+ *     held, which is what pins this down. H11 instead has a single opt4 0x40 download flag.
  *
- * What was directly A/B verified on this unit: every opcode above; rinse and softening levels
- * across their full 0..4 range; buzzer OFF/LOW/HIGH; end alarm sound; front time display;
- * display brightness; a 3-hour delay start (DelayHour=0x03 -> rsr[9]=3, counting down once a
- * minute). What is ASSUMED from H11 and NOT individually tested here: the opt3/opt4 course
- * option bits (high temp / extra dry / extra rinse level), settings opt1 bit 0x08 (wash-complete
- * light), and the two non-PERMANENT remote-start modes -- only PERMANENT (opt2 0x80) was ever
- * seen. The observed opt3/opt4 byte values (0x84/0x0C/0x00 and 0x00/0x08/0x00) are consistent
- * with the H11 decoding, which is why it is carried over.
+ * Start-command option bytes, all four captured smart-course starts agreeing exactly with the
+ * option defaults modelJSON lists for that course:
+ *   opt3 0x80 = Steam, 0x04 = ExtraDry (0x08 = HighTemp carried over from H11, never seen here)
+ *   opt4 0x08/0x10/0x18 = extra rinse 1/2/3 (from H11, never seen here), bits 5-6 = download slot
+ * An earlier reading of this file called opt3 0x80 a "downloaded cycle" marker, off one capture
+ * where steam happened to be on. A later download start (RINSING, which defaults to no options)
+ * carried opt3 0x00 and disproved it.
+ *
+ * What was directly verified on this unit: every opcode above; rinse and softening levels across
+ * their full 0..4 range; buzzer OFF/LOW/HIGH; end alarm sound; front time display; display
+ * brightness; delay start at two different hour values; four smart courses and their base/option
+ * bytes; one slot rewrite. What is ASSUMED from H11 and NOT tested here: opt3 0x08 (high temp),
+ * the opt4 extra-rinse levels, settings opt1 bit 0x08 (wash-complete light), and the two
+ * non-PERMANENT remote-start modes -- only PERMANENT (opt2 0x80) was ever seen.
  *
  * ---- Envelope (confirmed, unchanged from the original stub) ----
  * Wire format is the same "AA [len] ...inner [checksum^0x55] BB" envelope as H11.ts (see
@@ -256,19 +266,38 @@ const COURSE_NAME_TO_ID: Record<string, number> = Object.fromEntries(
     Object.entries(COURSES).map(([id, name]) => [name, Number(id)]),
 )
 
-// modelJSON `SmartCourse` dict. Reported in rsr[20] while a downloaded course is running.
-const SMART_COURSES: Record<number, string> = {
-    2: 'POTS_PANS',
-    3: 'GLASS_AND_WINE_GLASS',
-    4: 'GRILLED_MEAT',
-    5: 'GREASY_TABLEWARE', // observed 2026-09-08
-    6: 'PRESSED_TABLEWARE',
-    7: 'FISH_DISH',
-    8: 'DELICATE',
-    9: 'STEAM_REFRESH',
-    10: 'RINSING',
-    13: 'MACHINE_CLEAN',
-    15: 'PLASTIC_WASH',
+/*
+ * modelJSON `SmartCourse` dict, reported in rsr[20]. `base` is that entry's own `Course` field:
+ * a smart course rides on a plain course, and the appliance reports that base id in rsr[5].
+ * Confirmed against four real selections (5->18, 13->9, 10->6, 6->14), all exact.
+ *
+ * `opt3` is the option byte the LG app sends for that course, derived from the same entry's
+ * `function` defaults: Steam -> 0x80, ExtraDry -> 0x04. Also confirmed four times.
+ *
+ * `writable` is false where the entry defaults to something this driver cannot encode yet --
+ * ExtraRinseLevel or a non-zero SprayForce. Those most likely live in the seven trailing bytes
+ * of the download frame (six SprayForce fields, seven spare bytes), but no capture has ever
+ * shown one non-zero, so writing those two courses is refused rather than guessed.
+ */
+const SMART_COURSES: Record<number, { name: string; base: number; opt3: number; writable: boolean }> = {
+    2: { name: 'POTS_PANS', base: 14, opt3: 0x84, writable: true },
+    3: { name: 'GLASS_AND_WINE_GLASS', base: 18, opt3: 0x80, writable: false }, // ExtraRinse + SprayForce
+    4: { name: 'GRILLED_MEAT', base: 2, opt3: 0x04, writable: true },
+    5: { name: 'GREASY_TABLEWARE', base: 18, opt3: 0x04, writable: true }, // observed
+    6: { name: 'PRESSED_TABLEWARE', base: 14, opt3: 0x04, writable: true }, // observed
+    7: { name: 'FISH_DISH', base: 2, opt3: 0x84, writable: true },
+    8: { name: 'DELICATE', base: 18, opt3: 0x00, writable: false }, // SprayForce
+    9: { name: 'STEAM_REFRESH', base: 7, opt3: 0x80, writable: true },
+    10: { name: 'RINSING', base: 6, opt3: 0x00, writable: true }, // observed
+    13: { name: 'MACHINE_CLEAN', base: 9, opt3: 0x80, writable: true }, // observed
+    15: { name: 'PLASTIC_WASH', base: 11, opt3: 0x00, writable: true },
+}
+const SMART_COURSE_NAME_TO_ID: Record<string, number> = Object.fromEntries(
+    Object.entries(SMART_COURSES).map(([id, c]) => [c.name, Number(id)]),
+)
+
+function smartCourseName(code: number): string {
+    return SMART_COURSES[code]?.name || `DOWNLOAD_COURSE(${code})`
 }
 
 // rsr[1]. 0/1/2 observed directly; 3..7 follow the modelJSON `Process` enum order and are
@@ -297,7 +326,12 @@ export default class Device extends AABBDevice {
     private targetDelay: number = 0
     private targetHighTemp: boolean = false
     private targetExtraDry: boolean = false
+    private targetSteam: boolean = false
     private targetExtraRinse: number = 0
+    private targetDownloadSlot: number = 1 // which of the three slots DOWNLOAD_CYCLE runs
+
+    // Staged for `download_course`, which rewrites one slot rather than starting anything.
+    private targetDownloadCourse: string = 'GREASY_TABLEWARE'
 
     // The settings command carries every setting at once, so the current values have to be
     // kept around and re-sent whenever any single one changes. They are refreshed from every
@@ -512,6 +546,16 @@ export default class Device extends AABBDevice {
                         payload_on: 'ON',
                         payload_off: 'OFF',
                     },
+                    target_steam: {
+                        platform: 'switch',
+                        icon: 'mdi:kettle-steam',
+                        unique_id: '$deviceid-target_steam',
+                        state_topic: '$this/target_steam',
+                        command_topic: '$this/target_steam/set',
+                        name: 'Steam',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
                     target_extra_rinse: {
                         platform: 'select',
                         icon: 'mdi:water-plus',
@@ -520,6 +564,62 @@ export default class Device extends AABBDevice {
                         command_topic: '$this/target_extra_rinse/set',
                         name: 'Extra Rinse',
                         options: ['0', '1', '2', '3'],
+                    },
+                    target_download_slot: {
+                        platform: 'select',
+                        icon: 'mdi:numeric',
+                        unique_id: '$deviceid-target_download_slot',
+                        state_topic: '$this/target_download_slot',
+                        command_topic: '$this/target_download_slot/set',
+                        name: 'Download Slot',
+                        options: ['1', '2', '3'],
+                    },
+                    current_download_course: {
+                        platform: 'sensor',
+                        icon: 'mdi:download-circle',
+                        unique_id: '$deviceid-current_download_course',
+                        state_topic: '$this/current_download_course',
+                        name: 'Current Download Course',
+                    },
+                    download_slot_1: {
+                        platform: 'sensor',
+                        icon: 'mdi:numeric-1-circle',
+                        unique_id: '$deviceid-download_slot_1',
+                        state_topic: '$this/download_slot_1',
+                        name: 'Download Slot 1',
+                    },
+                    download_slot_2: {
+                        platform: 'sensor',
+                        icon: 'mdi:numeric-2-circle',
+                        unique_id: '$deviceid-download_slot_2',
+                        state_topic: '$this/download_slot_2',
+                        name: 'Download Slot 2',
+                    },
+                    download_slot_3: {
+                        platform: 'sensor',
+                        icon: 'mdi:numeric-3-circle',
+                        unique_id: '$deviceid-download_slot_3',
+                        state_topic: '$this/download_slot_3',
+                        name: 'Download Slot 3',
+                    },
+                    target_download_course: {
+                        platform: 'select',
+                        icon: 'mdi:download',
+                        unique_id: '$deviceid-target_download_course',
+                        state_topic: '$this/target_download_course',
+                        command_topic: '$this/target_download_course/set',
+                        name: 'Course To Download',
+                        options: Object.values(SMART_COURSES)
+                            .filter((c) => c.writable)
+                            .map((c) => c.name),
+                    },
+                    download_course: {
+                        platform: 'button',
+                        icon: 'mdi:download-box',
+                        unique_id: '$deviceid-download_course',
+                        command_topic: '$this/download_course/set',
+                        name: 'Write Course Into Slot',
+                        payload_press: 'PRESS',
                     },
                     start_course: {
                         platform: 'button',
@@ -604,7 +704,10 @@ export default class Device extends AABBDevice {
         this.publishProperty('target_delay', this.targetDelay)
         this.publishProperty('target_high_temp', this.targetHighTemp ? 'ON' : 'OFF')
         this.publishProperty('target_extra_dry', this.targetExtraDry ? 'ON' : 'OFF')
+        this.publishProperty('target_steam', this.targetSteam ? 'ON' : 'OFF')
         this.publishProperty('target_extra_rinse', String(this.targetExtraRinse))
+        this.publishProperty('target_download_slot', String(this.targetDownloadSlot))
+        this.publishProperty('target_download_course', this.targetDownloadCourse)
     }
 
     // The unit has no per-setting write: every settings command carries the full set, so this
@@ -643,6 +746,37 @@ export default class Device extends AABBDevice {
                 0x00,
             ]),
         )
+    }
+
+    /*
+     * opt3: the course option byte. 0x80=Steam and 0x04=ExtraDry are confirmed -- every one of
+     * the four captured smart-course starts carried exactly the option defaults modelJSON lists
+     * for that course. 0x08=HighTemp is carried over from H11 and never seen on this unit.
+     *
+     * Note 0x80 is Steam and NOT a "downloaded cycle" marker, despite a single early capture
+     * where a download start happened to have it set: a later download start (RINSING, which
+     * defaults to no options at all) carried opt3 0x00.
+     */
+    private optionByte(): number {
+        let opt3 = 0x00
+        if (this.targetSteam) opt3 |= 0x80
+        if (this.targetHighTemp) opt3 |= 0x08
+        if (this.targetExtraDry) opt3 |= 0x04
+        return opt3
+    }
+
+    /*
+     * opt4: extra-rinse level in the low bits, and for DOWNLOAD_CYCLE the slot to run in bits
+     * 5-6. Slots 1/2/3 were seen as 0x00/0x20/0x40, and slot 3 kept 0x40 after its contents were
+     * replaced -- so this selects the slot, not the course sitting in it.
+     */
+    private rinseAndSlotByte(): number {
+        let opt4 = 0x00
+        if (this.targetExtraRinse === 1) opt4 |= 0x08
+        else if (this.targetExtraRinse === 2) opt4 |= 0x10
+        else if (this.targetExtraRinse === 3) opt4 |= 0x18
+        if (this.targetCourseId === 0x0b) opt4 |= (this.targetDownloadSlot - 1) << 5
+        return opt4
     }
 
     setProperty(prop: string, mqttValue: string) {
@@ -684,6 +818,10 @@ export default class Device extends AABBDevice {
                 this.targetExtraDry = mqttValue === 'ON'
                 this.publishProperty('target_extra_dry', mqttValue)
                 return
+            case 'target_steam':
+                this.targetSteam = mqttValue === 'ON'
+                this.publishProperty('target_steam', mqttValue)
+                return
             case 'target_extra_rinse': {
                 const val = parseInt(mqttValue, 10)
                 if (!isNaN(val)) {
@@ -694,23 +832,74 @@ export default class Device extends AABBDevice {
             }
 
             // ---- F0 26 10 [Course][DelayHour][00][opt3][opt4][00] ----
-            case 'start_course': {
-                // opt3/opt4 bit meanings are taken from H11; on H07 only the resulting byte
-                // values were observed (0x84/0x0C/0x00 and 0x00/0x08/0x00), matching this
-                // decoding, but the individual bits were not A/B tested here.
-                let opt3 = 0x00
-                if (this.targetHighTemp) opt3 |= 0x08
-                if (this.targetExtraDry) opt3 |= 0x04
-                // H07 flags a downloaded cycle in opt3 bit 0x80, where H11 uses opt4 bit 0x40.
-                if (this.targetCourseId === 0x0b) opt3 |= 0x80
-
-                let opt4 = 0x00
-                if (this.targetExtraRinse === 1) opt4 |= 0x08
-                else if (this.targetExtraRinse === 2) opt4 |= 0x10
-                else if (this.targetExtraRinse === 3) opt4 |= 0x18
-
+            case 'start_course':
                 this.send(
-                    Buffer.from([0xf0, 0x26, 0x10, this.targetCourseId, this.targetDelay, 0x00, opt3, opt4, 0x00]),
+                    Buffer.from([
+                        0xf0,
+                        0x26,
+                        0x10,
+                        this.targetCourseId,
+                        this.targetDelay,
+                        0x00,
+                        this.optionByte(),
+                        this.rinseAndSlotByte(),
+                        0x00,
+                    ]),
+                )
+                return
+
+            case 'target_download_slot': {
+                const val = parseInt(mqttValue, 10)
+                if (val >= 1 && val <= 3) {
+                    this.targetDownloadSlot = val
+                    this.publishProperty('target_download_slot', mqttValue)
+                }
+                return
+            }
+            case 'target_download_course':
+                if (SMART_COURSE_NAME_TO_ID[mqttValue] !== undefined) {
+                    this.targetDownloadCourse = mqttValue
+                    this.publishProperty('target_download_course', mqttValue)
+                }
+                return
+
+            // ---- F0 25 [Slot][00][BaseCourse][SmartCourse][00][00][opt3][opt4][00 x7] ----
+            // Rewrites what one of the three download slots holds. Captured once, byte-exact:
+            // slot 3 <- PRESSED_TABLEWARE produced `03 00 0E 06 00 00 04 40` + seven zero bytes,
+            // and the slot byte in the status record followed two seconds later. Nothing has to
+            // be started for this to take effect.
+            case 'download_course': {
+                const id = SMART_COURSE_NAME_TO_ID[this.targetDownloadCourse]
+                const course = id === undefined ? undefined : SMART_COURSES[id]
+                if (!course || !course.writable) {
+                    console.warn(
+                        `H07: refusing to download '${this.targetDownloadCourse}' -- its option defaults ` +
+                            `(extra rinse / spray force) have no confirmed encoding in this frame`,
+                    )
+                    log('status', this.id, `H07: download of '${this.targetDownloadCourse}' refused (unverified)`)
+                    return
+                }
+                const slot = this.targetDownloadSlot
+                this.send(
+                    Buffer.from([
+                        0xf0,
+                        0x25,
+                        slot,
+                        0x00,
+                        course.base,
+                        id,
+                        0x00,
+                        0x00,
+                        course.opt3,
+                        (slot - 1) << 5,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                    ]),
                 )
                 return
             }
@@ -848,13 +1037,22 @@ export default class Device extends AABBDevice {
         const baseCourseCode = rsr[5]
         let courseStr: string
         if (smartCourseCode !== 0) {
-            courseStr = SMART_COURSES[smartCourseCode] || `DOWNLOAD_COURSE(${smartCourseCode})`
+            courseStr = smartCourseName(smartCourseCode)
         } else if (baseCourseCode === 0) {
             courseStr = 'NONE'
         } else {
-            courseStr = COURSES[baseCourseCode] || `UNKNOWN(${baseCourseCode})`
+            courseStr = COURSES[baseCourseCode] || `COURSE(${baseCourseCode})`
         }
         this.publishProperty('course', courseStr)
+
+        // The three download slots and whichever of them is currently selected. rsr[24..26] were
+        // read as 05/0D/0A -- the exact three courses the appliance offered -- and rsr[26] flipped
+        // 0A -> 06 two seconds after a slot was rewritten from the app.
+        this.publishProperty('current_download_course', rsr[23] === 0 ? 'NONE' : smartCourseName(rsr[23]))
+        for (let slot = 1; slot <= 3; slot++) {
+            const code = rsr[23 + slot]
+            this.publishProperty(`download_slot_${slot}`, code === 0 ? 'NONE' : smartCourseName(code))
+        }
 
         // Initial / remaining / delay-start times, each an (hour, minute) pair.
         this.publishProperty('course_time', rsr[3] * 60 + rsr[4])

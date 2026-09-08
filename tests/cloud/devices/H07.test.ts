@@ -184,6 +184,50 @@ describe('H07 commands reproduce the bytes LG sent', () => {
         assert.equal(hex(thinq.outbox[0]), 'AA0EF026010172804000000057BB')
     })
 
+    test('a downloaded course starts by slot, and does not turn steam on by itself', () => {
+        const { thinq, dev } = makeDevice()
+        dev.setProperty('target_course', 'DOWNLOAD_CYCLE')
+        dev.setProperty('target_download_slot', '3')
+        dev.setProperty('target_extra_dry', 'ON')
+        thinq.resetRecorder()
+
+        dev.setProperty('start_course', 'PRESS')
+        // Exactly what the app sent for slot 3 (RINSING at the time), with no delay: opt3 is the
+        // extra-dry bit alone and opt4 carries the slot. An earlier revision set opt3 bit 0x80
+        // here, which is steam.
+        assert.equal(hex(thinq.outbox[0]), 'AA0DF026100B000004400079BB')
+    })
+
+    test('writing a course into a slot matches the captured download frame', () => {
+        const { thinq, dev } = makeDevice()
+        dev.setProperty('target_download_slot', '3')
+        dev.setProperty('target_download_course', 'PRESSED_TABLEWARE')
+        thinq.resetRecorder()
+
+        dev.setProperty('download_course', 'PRESS')
+        assert.equal(hex(thinq.outbox[0]), 'AA15F02503000E0600000440000000000000007ABB')
+    })
+
+    test('a course whose options cannot be encoded is refused', () => {
+        const { thinq, dev } = makeDevice()
+        dev.setProperty('target_download_course', 'DELICATE') // spray-force defaults
+        thinq.resetRecorder()
+
+        dev.setProperty('download_course', 'PRESS')
+        assert.equal(thinq.outbox.length, 0)
+    })
+
+    test('the download slots are read out of the status record', () => {
+        const { HA, thinq } = makeDevice()
+        thinq.emit('data', IDLE_BUZZER_OFF)
+
+        const p = props(HA)
+        assert.equal(p.download_slot_1, 'GREASY_TABLEWARE')
+        assert.equal(p.download_slot_2, 'MACHINE_CLEAN')
+        assert.equal(p.download_slot_3, 'RINSING')
+        assert.equal(p.current_download_course, 'GREASY_TABLEWARE')
+    })
+
     test('an unknown property sends nothing', () => {
         const { thinq, dev } = makeDevice()
         dev.setProperty('not-a-real-property', 'whatever')
