@@ -218,15 +218,25 @@ describe('H07 commands reproduce the bytes LG sent', () => {
         assert.equal(hex(thinq.outbox[0]), 'AA0DF026100B000004400079BB')
     })
 
-    test('writing a course into a slot matches the captured download frame', () => {
-        const { thinq, dev } = makeDevice()
-        dev.setProperty('target_download_slot', '3')
-        dev.setProperty('target_download_course', 'PRESSED_TABLEWARE')
-        thinq.resetRecorder()
+    // One frame per slot, all captured from the app. The leading 0x03 is identical in all three,
+    // which is what proves it is a constant rather than the slot number -- only opt4 moves.
+    const downloads: [string, string, string][] = [
+        ['1', 'PRESSED_TABLEWARE', 'AA15F02503000E060000040000000000000000BABB'],
+        ['2', 'GREASY_TABLEWARE', 'AA15F02503001205000004200000000000000047BB'],
+        ['3', 'PRESSED_TABLEWARE', 'AA15F02503000E0600000440000000000000007ABB'],
+    ]
 
-        dev.setProperty('download_course', 'PRESS')
-        assert.equal(hex(thinq.outbox[0]), 'AA15F02503000E0600000440000000000000007ABB')
-    })
+    for (const [slot, course, expected] of downloads) {
+        test(`writing ${course} into slot ${slot} matches the captured frame`, () => {
+            const { thinq, dev } = makeDevice()
+            dev.setProperty('target_download_slot', slot)
+            dev.setProperty('target_download_course', course)
+            thinq.resetRecorder()
+
+            dev.setProperty('download_course', 'PRESS')
+            assert.equal(hex(thinq.outbox[0]), expected)
+        })
+    }
 
     test('a course whose options cannot be encoded is refused', () => {
         const { thinq, dev } = makeDevice()

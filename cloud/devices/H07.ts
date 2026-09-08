@@ -932,7 +932,13 @@ export default class Device extends AABBDevice {
                     Buffer.from([
                         0xf0,
                         0x25,
-                        slot,
+                        // A constant, not the slot: modelJSON's downloadCourse leads with
+                        // courseDownloadType COURSEDATA, and slot 1, 2 and 3 all send 0x03 here.
+                        // The slot itself is carried only by opt4 below. Reading this byte as the
+                        // slot number is why writes to slots 1 and 2 were silently ignored -- the
+                        // one captured frame happened to be slot 3, where 0x03 and opt4's 0x40
+                        // agree on "three" and cannot be told apart.
+                        0x03,
                         0x00,
                         course.base,
                         id,
