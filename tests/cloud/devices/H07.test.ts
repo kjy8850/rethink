@@ -113,6 +113,26 @@ describe('H07 status decoding', () => {
         assert.equal(p.course, 'OVERNIGHT')
     })
 
+    test('the pending selection is seeded from the appliance, not reset to defaults', () => {
+        const { HA, thinq } = makeDevice()
+        thinq.emit('data', DELAY_START_ARMED)
+
+        const p = props(HA)
+        assert.equal(p.target_course, 'OVERNIGHT') // not the AUTO it starts life with
+        assert.equal(p.target_delay, 3) // recovered from the running countdown
+        assert.equal(p.target_steam, 'OFF')
+        assert.equal(p.target_extra_dry, 'OFF')
+    })
+
+    test('seeding happens once, so a later record does not undo a staged change', () => {
+        const { HA, thinq, dev } = makeDevice()
+        thinq.emit('data', DELAY_START_ARMED)
+        dev.setProperty('target_course', 'INTENSIVE')
+        thinq.emit('data', START_UPPER_EXPRESS)
+
+        assert.equal(props(HA).target_course, 'INTENSIVE')
+    })
+
     test('settings come back off the status record', () => {
         const { HA, thinq } = makeDevice()
         thinq.emit('data', IDLE_BUZZER_OFF)

@@ -333,6 +333,11 @@ export default class Device extends AABBDevice {
     // Staged for `download_course`, which rewrites one slot rather than starting anything.
     private targetDownloadCourse: string = 'GREASY_TABLEWARE'
 
+    // The staged values above are this driver's own "what to send next" and do not survive a
+    // restart on their own. Rather than come back as arbitrary defaults, they are seeded once
+    // from the first status record -- see adoptFromStatus.
+    private adopted: boolean = false
+
     // The settings command carries every setting at once, so the current values have to be
     // kept around and re-sent whenever any single one changes. They are refreshed from every
     // status record, so these initial values only matter before the first record arrives.
@@ -779,6 +784,49 @@ export default class Device extends AABBDevice {
         return opt4
     }
 
+    /*
+     * Seed the staged course parameters from what the appliance itself reports, once, on the
+     * first status record after startup. Without this a restart would silently reset the pending
+     * selection to AUTO with every option off, which is a claim about the appliance that nothing
+     * checked -- adopting its own reading is both truer and less surprising.
+     *
+     * What is recoverable: the course (rsr[5], or DOWNLOAD_CYCLE plus the slot when rsr[20] says
+     * a downloaded course is loaded), the option bits (rsr[12] echoes the option byte of the last
+     * start, minus its delay-armed bit), and the delay hours while a reservation is still armed.
+     *
+     * What is NOT: the extra-rinse level, which the status record has no confirmed field for, and
+     * a delay that was staged but never started. Those stay at their defaults.
+     */
+    private adoptFromStatus(rsr: Buffer) {
+        this.adopted = true
+
+        if (rsr[20] !== 0) {
+            this.targetCourseId = 0x0b // DOWNLOAD_CYCLE
+            const slot = Math.floor(rsr[28] / 2) + 1
+            if (slot >= 1 && slot <= 3) this.targetDownloadSlot = slot
+        } else if (COURSES[rsr[5]]) {
+            this.targetCourseId = rsr[5]
+        }
+
+        // rsr[12] carries the start command's opt3 back, with bit 0x01 added while a delay start
+        // is armed -- mask that out before reading the option bits.
+        const opts = rsr[12] & ~0x01
+        this.targetSteam = (opts & 0x80) !== 0
+        this.targetHighTemp = (opts & 0x08) !== 0
+        this.targetExtraDry = (opts & 0x04) !== 0
+
+        // Only meaningful while counting down; otherwise the appliance reports 0:00 and the
+        // originally requested hour is simply not on the wire any more.
+        if (rsr[1] === 0x01) this.targetDelay = rsr[9] + (rsr[10] > 0 ? 1 : 0)
+
+        this.publishProperty('target_course', COURSES[this.targetCourseId] || 'AUTO')
+        this.publishProperty('target_download_slot', String(this.targetDownloadSlot))
+        this.publishProperty('target_steam', this.targetSteam ? 'ON' : 'OFF')
+        this.publishProperty('target_high_temp', this.targetHighTemp ? 'ON' : 'OFF')
+        this.publishProperty('target_extra_dry', this.targetExtraDry ? 'ON' : 'OFF')
+        this.publishProperty('target_delay', this.targetDelay)
+    }
+
     setProperty(prop: string, mqttValue: string) {
         switch (prop) {
             // ---- direct commands (opcodes captured 2026-09-08, checksums verified) ----
@@ -1107,5 +1155,7 @@ export default class Device extends AABBDevice {
         // Everything from byte[2] onward (including the State byte itself, for cross-checking)
         // is also published verbatim -- see class header for the fields that remain unmapped.
         this.publishProperty('raw_status_record', rsr.toString('hex').toUpperCase())
+
+        if (!this.adopted) this.adoptFromStatus(rsr)
     }
 }
