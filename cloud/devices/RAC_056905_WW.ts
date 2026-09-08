@@ -403,35 +403,30 @@ export default class Device extends TLVDevice {
             write_attach: [0x1f7, 0x1fa, 0x1fe],
         })
 
+        /*
+         * Indoor units do not all number their fan steps the same way. The wall RAC this file
+         * was written for uses 2..6; a ceiling cassette uses 1, 2, 4, 6, 7 -- measured on real
+         * hardware by stepping the wall remote through 미약/약/중/강/파워 and watching 0x1fa.
+         *
+         * The difference is not cosmetic. Writing a step the unit does not have (3 or 5 on a
+         * cassette) is accepted and then silently ignored, so two of the six buttons did
+         * nothing; and the steps it does report (1 and 7) had no name here at all, so picking
+         * them on the remote left the speed shown in HA frozen at its previous value. The
+         * names in between were wrong rather than missing -- 'very low' actually selected 약풍.
+         */
+        const fanSteps: Record<string, number> =
+            this.meta.modelName === 'CST_570004_WW'
+                ? { 'very low': 1, low: 2, medium: 4, high: 6, 'very high': 7, auto: 8 }
+                : { 'very low': 2, low: 3, medium: 4, high: 5, 'very high': 6, auto: 8 }
+        const fanNames: Record<number, string> = {}
+        for (const name of Object.keys(fanSteps)) fanNames[fanSteps[name]] = name
+
         this.addField(config, {
             id: 0x1fa,
             name: 'fan_mode',
             comp: 'climate',
-            read_xform: (raw) => {
-                const modes2ha = [
-                    undefined,
-                    undefined,
-                    'very low',
-                    'low',
-                    'medium',
-                    'high',
-                    'very high',
-                    undefined,
-                    'auto',
-                ]
-                return modes2ha[raw]
-            },
-            write_xform: (val) => {
-                const modes2clip: Record<string, number> = {
-                    'very low': 2,
-                    low: 3,
-                    medium: 4,
-                    high: 5,
-                    'very high': 6,
-                    auto: 8,
-                }
-                return modes2clip[val]
-            },
+            read_xform: (raw) => fanNames[raw],
+            write_xform: (val) => fanSteps[val],
             write_attach: [0x1f9, 0x1fe],
         })
 
