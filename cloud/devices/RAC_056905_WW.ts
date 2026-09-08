@@ -279,6 +279,20 @@ export default class Device extends TLVDevice {
     }
 
     initMakeSetConfig() {
+        /*
+         * The unit reports its own setpoint limits and they are not the 18..30 assumed here.
+         * A ceiling cassette answers 0x2e1=32 / 0x2e2=60 -- half-degree units, so 16 C..30 C --
+         * and an independent local implementation reading the same appliance family decodes
+         * that same pair as the cooling minimum and maximum. Assuming 18 hid two whole degrees
+         * of cooling that the appliance is happy to do. Trust the device where it answers, and
+         * keep the old constants for units that stay silent or report something implausible.
+         */
+        const rawMin = this.raw_clip_state[0x2e1]
+        const rawMax = this.raw_clip_state[0x2e2]
+        const reportedRange = rawMin != null && rawMax != null && rawMin < rawMax && rawMin >= 20 && rawMax <= 76
+        const minTemp = reportedRange ? rawMin / 2 : 18
+        const maxTemp = reportedRange ? rawMax / 2 : 30
+
         const config: DeviceDiscovery & { components: { climate: ClimateComponent } } = allowExtendedType({
             ...HADevice.config(this.meta, { name: 'LG Air Conditioner' }),
             components: {
@@ -291,10 +305,8 @@ export default class Device extends TLVDevice {
                     /* TODO: detect 0.5 C vs 1 C step */
                     temp_step: 0.5,
                     precision: 0.5,
-                    /* TODO: some devices report these temp ranges via tags 0x2e1 - 0x2ec */
-                    min_temp: 18,
-                    max_temp: 30,
-                    /* TODO: get from 0x2c2 */
+                    min_temp: minTemp,
+                    max_temp: maxTemp,
                     fan_modes: ['auto', 'very low', 'low', 'medium', 'high', 'very high'],
                     /*
                      * TODO: get allowed op modes from 0x2c1 generically. Until then, hardcode the
