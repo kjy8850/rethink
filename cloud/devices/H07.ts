@@ -10,10 +10,38 @@ import log from '@/util/logging'
  * LG Dishwasher H07 (ThinQ modelName "H07", modelId/kind "H07", DeviceType 204,
  * modemType RTK_RTL8720cm).
  *
- * Status: mapped as of 2026-09-05 (web-verified pass). `state` plus 9 settings fields are now
- * backed by real evidence gathered via a controlled LG ThinQ Web test session (see below).
- * Course/Process/RemainTime/Door-by-deliberate-test/etc. remain unconfirmed and stay in
- * `raw_status_record` as a raw diagnostic byte dump.
+ * Status: read AND write mapped as of 2026-09-08. The 2026-09-05 pass (below) confirmed `state`
+ * plus 9 settings fields via a controlled LG ThinQ Web session; the 2026-09-08 pass added
+ * Process/Course/times/delay-start and, crucially, the WRITE protocol -- captured from real LG
+ * ThinQ app commands as they passed through this bridge.
+ *
+ * ---- Write protocol (captured 2026-09-08, every checksum verified byte-exact) ----
+ * Commands arrive from the LG cloud and appear in the log as `bridge <id> <- AA..BB` (the `->`
+ * direction is device-to-cloud status; reading only `incoming` lines misses commands entirely).
+ * They use the same envelope as status frames, with inner payload `F0 26 <opcode> [args]`:
+ *
+ *   F0 26 10 [Course][DelayHour][00][opt3][opt4][00] -- start course   (observed 4x)
+ *   F0 26 11                                         -- cancel / drain stop (3x)
+ *   F0 26 12                                         -- power off      (3x)
+ *   F0 26 13                                         -- pause          (4x)
+ *   F0 26 14                                         -- resume         (4x)
+ *   F0 26 16                                         -- power on/wake  (3x)
+ *   F0 26 [Rinse][Softening][opt1][opt2][opt3] 00 00 00 -- settings    (28x)
+ *
+ * These are the same opcodes H11.ts already sends, so the two models share the command layer as
+ * well as the status layout. Two places where H07 differs from H11 and the difference is real:
+ *   - settings opt1 bit 0x10 is the front time display (H11 has no bit there; H11's 0x08 is its
+ *     clean reminder). Verified by A/B: toggling it in the app moved rsr[15] bit 0x08.
+ *   - a downloaded (smart) course sets opt3 bit 0x80 on start, where H11 sets opt4 bit 0x40.
+ *
+ * What was directly A/B verified on this unit: every opcode above; rinse and softening levels
+ * across their full 0..4 range; buzzer OFF/LOW/HIGH; end alarm sound; front time display;
+ * display brightness; a 3-hour delay start (DelayHour=0x03 -> rsr[9]=3, counting down once a
+ * minute). What is ASSUMED from H11 and NOT individually tested here: the opt3/opt4 course
+ * option bits (high temp / extra dry / extra rinse level), settings opt1 bit 0x08 (wash-complete
+ * light), and the two non-PERMANENT remote-start modes -- only PERMANENT (opt2 0x80) was ever
+ * seen. The observed opt3/opt4 byte values (0x84/0x0C/0x00 and 0x00/0x08/0x00) are consistent
+ * with the H11 decoding, which is why it is carried over.
  *
  * ---- Envelope (confirmed, unchanged from the original stub) ----
  * Wire format is the same "AA [len] ...inner [checksum^0x55] BB" envelope as H11.ts (see
@@ -182,14 +210,26 @@ import log from '@/util/logging'
  * pass. Calling setProperty for any of these (or for start/cancel) logs a warning and does
  * nothing, matching the same safety principle used for `initDevice` re-registration.
  *
- * ---- Next steps (see session report) ----
- * 1. Start one real (short) course from the LG panel/app and capture packets through to
- *    completion, to find course/remain-time/option byte offsets (byte[4..10], byte[17..18],
- *    byte[20..45] all remain unmapped).
- * 2. Deliberately capture a door open/close cycle (this pass only observed one passively) to
- *    fully confirm byte[11] bit 0x02 beyond the cross-model + single-observation evidence above.
- * 3. Only once offsets are independently confirmed against real behavior, implement
- *    setProperty()/send() for actual commands.
+ * ---- Status record, 2026-09-08 additions ----
+ * The first eleven bytes turned out to follow modelJSON's `Monitoring.protocol` field order
+ * exactly: state, process, error, initialTimeH, initialTimeM, course, courseType, remainTimeH,
+ * remainTimeM, reserveTimeH, reserveTimeM. All confirmed against real runs:
+ *   byte[1]  Process   -- 0=NONE, 1=RESERVED, 2=RUNNING, 0x63=cancel/drain.
+ *   byte[3,4]  Initial_Time H:M  -- 2:12, 1:46 and 2:08 for three different courses.
+ *   byte[5]  Course    -- matches the course byte of the start command that produced it.
+ *   byte[6]  CourseType -- 1 while a smart course is loaded, 0 for a plain course.
+ *   byte[7,8]  Remain_Time H:M   -- drops to 0:01 on cancel, and the unit really does return
+ *              to INITIAL exactly one minute later (seen three times).
+ *   byte[9,10] Reserve_Time H:M  -- a 3-hour delay start shows 3:00 and counts down 1/min.
+ *   byte[12] mirrors the start command's opt3, plus bit 0x01 while a delay start is armed.
+ *   byte[20] SmartCourse -- 5 (GREASY_TABLEWARE) while that downloaded course ran.
+ *
+ * ---- Still unmapped / unverified ----
+ * 1. opt3/opt4 course option bits and settings opt1 bit 0x08 -- carried over from H11 (see the
+ *    write-protocol note above); A/B each one on this unit to promote them from "assumed".
+ * 2. byte[11] bit 0x08 toggles during cancel/drain; byte[21] is 0x10 for the upper-express
+ *    course while the start command's opt4 was 0x08. Both still unexplained.
+ * 3. byte[17,18] and byte[22..45] are untouched by anything tried so far.
  */
 
 const DISHWASHER_STATES: Record<number, string> = {
@@ -216,12 +256,61 @@ const COURSE_NAME_TO_ID: Record<string, number> = Object.fromEntries(
     Object.entries(COURSES).map(([id, name]) => [name, Number(id)]),
 )
 
+// modelJSON `SmartCourse` dict. Reported in rsr[20] while a downloaded course is running.
+const SMART_COURSES: Record<number, string> = {
+    2: 'POTS_PANS',
+    3: 'GLASS_AND_WINE_GLASS',
+    4: 'GRILLED_MEAT',
+    5: 'GREASY_TABLEWARE', // observed 2026-09-08
+    6: 'PRESSED_TABLEWARE',
+    7: 'FISH_DISH',
+    8: 'DELICATE',
+    9: 'STEAM_REFRESH',
+    10: 'RINSING',
+    13: 'MACHINE_CLEAN',
+    15: 'PLASTIC_WASH',
+}
+
+// rsr[1]. 0/1/2 observed directly; 3..7 follow the modelJSON `Process` enum order and are
+// UNCONFIRMED. 0x63 breaks that order but is what the unit really reports while draining
+// after a cancel (observed three times), so it is listed explicitly rather than as ordinal 8.
+const PROCESSES: Record<number, string> = {
+    0: 'NONE', // observed
+    1: 'RESERVED', // observed (delay start armed)
+    2: 'RUNNING', // observed
+    3: 'RINSING', // unconfirmed -- enum order only
+    4: 'DRYING', // unconfirmed -- enum order only
+    5: 'END', // unconfirmed -- enum order only
+    6: 'NIGHTDRY', // unconfirmed -- enum order only
+    7: 'COOLDRY', // unconfirmed -- enum order only
+    0x63: 'CANCEL', // observed
+}
+
 export default class Device extends AABBDevice {
     readonly deviceConfig: DeviceDiscovery
 
     private frameCount = 0
     private statusFrameCount = 0
-    private targetCourseId: number = 1 // AUTO -- staged locally only, never sent
+
+    // Staged locally, only sent when `start_course` is pressed.
+    private targetCourseId: number = 1 // AUTO
+    private targetDelay: number = 0
+    private targetHighTemp: boolean = false
+    private targetExtraDry: boolean = false
+    private targetExtraRinse: number = 0
+
+    // The settings command carries every setting at once, so the current values have to be
+    // kept around and re-sent whenever any single one changes. They are refreshed from every
+    // status record, so these initial values only matter before the first record arrives.
+    private cachedRinseLevel: number = 2
+    private cachedSofteningLevel: number = 1
+    private cachedBuzzerLevel: string = 'LOW'
+    private cachedEndAlarmSound: boolean = true
+    private cachedAutoDry: boolean = true
+    private cachedTimeIndicator: boolean = true
+    private cachedWashCompleteLight: boolean = false
+    private cachedBrightness: boolean = true
+    private cachedRemoteStartMode: string = 'PERMANENT'
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq)
@@ -231,12 +320,58 @@ export default class Device extends AABBDevice {
             allowExtendedType({
                 ...this.deviceConfig,
                 components: {
+                    power: {
+                        platform: 'switch',
+                        icon: 'mdi:power',
+                        unique_id: '$deviceid-power',
+                        state_topic: '$this/power',
+                        command_topic: '$this/power/set',
+                        name: 'Power',
+                    },
                     state: {
                         platform: 'sensor',
                         icon: 'mdi:washing-machine',
                         unique_id: '$deviceid-state',
                         state_topic: '$this/state',
                         name: 'State',
+                    },
+                    process: {
+                        platform: 'sensor',
+                        icon: 'mdi:progress-clock',
+                        unique_id: '$deviceid-process',
+                        state_topic: '$this/process',
+                        name: 'Process',
+                    },
+                    course: {
+                        platform: 'sensor',
+                        icon: 'mdi:dishwasher',
+                        unique_id: '$deviceid-course',
+                        state_topic: '$this/course',
+                        name: 'Course',
+                    },
+                    course_time: {
+                        platform: 'sensor',
+                        icon: 'mdi:timer',
+                        unique_id: '$deviceid-course_time',
+                        state_topic: '$this/course_time',
+                        name: 'Course Time',
+                        unit_of_measurement: 'min',
+                    },
+                    remain_time: {
+                        platform: 'sensor',
+                        icon: 'mdi:timer-sand',
+                        unique_id: '$deviceid-remain_time',
+                        state_topic: '$this/remain_time',
+                        name: 'Remain Time',
+                        unit_of_measurement: 'min',
+                    },
+                    reserve_time: {
+                        platform: 'sensor',
+                        icon: 'mdi:clock-fast',
+                        unique_id: '$deviceid-reserve_time',
+                        state_topic: '$this/reserve_time',
+                        name: 'Delay Start Remaining',
+                        unit_of_measurement: 'min',
                     },
                     door: {
                         platform: 'binary_sensor',
@@ -253,7 +388,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-rinse_level',
                         state_topic: '$this/rinse_level',
                         command_topic: '$this/rinse_level/set',
-                        name: 'Rinse Level (not yet functional)',
+                        name: 'Rinse Level',
                         min: 0,
                         max: 4,
                         step: 1,
@@ -264,7 +399,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-softening_level',
                         state_topic: '$this/softening_level',
                         command_topic: '$this/softening_level/set',
-                        name: 'Water Softening Level (not yet functional)',
+                        name: 'Water Softening Level',
                         min: 0,
                         max: 4,
                         step: 1,
@@ -275,7 +410,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-buzzer_level',
                         state_topic: '$this/buzzer_level',
                         command_topic: '$this/buzzer_level/set',
-                        name: 'Buzzer Level (not yet functional)',
+                        name: 'Buzzer Level',
                         options: ['OFF', 'LOW', 'HIGH'],
                     },
                     end_alarm_sound: {
@@ -284,7 +419,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-end_alarm_sound',
                         state_topic: '$this/end_alarm_sound',
                         command_topic: '$this/end_alarm_sound/set',
-                        name: 'End Alarm Sound (not yet functional)',
+                        name: 'End Alarm Sound',
                         payload_on: 'ON',
                         payload_off: 'OFF',
                     },
@@ -294,7 +429,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-wash_complete_light',
                         state_topic: '$this/wash_complete_light',
                         command_topic: '$this/wash_complete_light/set',
-                        name: 'Wash Complete Notification Light (not yet functional)',
+                        name: 'Wash Complete Notification Light',
                         payload_on: 'ON',
                         payload_off: 'OFF',
                     },
@@ -304,7 +439,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-auto_dry',
                         state_topic: '$this/auto_dry',
                         command_topic: '$this/auto_dry/set',
-                        name: 'Auto Dry Option (not yet functional)',
+                        name: 'Auto Dry Option',
                         payload_on: 'ON',
                         payload_off: 'OFF',
                     },
@@ -314,7 +449,7 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-time_indicator',
                         state_topic: '$this/time_indicator',
                         command_topic: '$this/time_indicator/set',
-                        name: 'Front Time Display (not yet functional)',
+                        name: 'Front Time Display',
                         payload_on: 'ON',
                         payload_off: 'OFF',
                     },
@@ -324,9 +459,18 @@ export default class Device extends AABBDevice {
                         unique_id: '$deviceid-brightness',
                         state_topic: '$this/brightness',
                         command_topic: '$this/brightness/set',
-                        name: 'Time Display Brightness (not yet functional)',
+                        name: 'Time Display Brightness',
                         payload_on: 'HIGH',
                         payload_off: 'LOW',
+                    },
+                    remote_start_mode: {
+                        platform: 'select',
+                        icon: 'mdi:remote',
+                        unique_id: '$deviceid-remote_start_mode',
+                        state_topic: '$this/remote_start_mode',
+                        command_topic: '$this/remote_start_mode/set',
+                        name: 'Remote Start Mode',
+                        options: ['PERMANENT', 'ONE_TIME', 'OFF'],
                     },
                     target_course: {
                         platform: 'select',
@@ -337,12 +481,68 @@ export default class Device extends AABBDevice {
                         name: 'Target Course',
                         options: Object.values(COURSES),
                     },
+                    target_delay: {
+                        platform: 'number',
+                        icon: 'mdi:clock-start',
+                        unique_id: '$deviceid-target_delay',
+                        state_topic: '$this/target_delay',
+                        command_topic: '$this/target_delay/set',
+                        name: 'Delay Start Hour',
+                        min: 0,
+                        max: 12,
+                        step: 1,
+                    },
+                    target_high_temp: {
+                        platform: 'switch',
+                        icon: 'mdi:thermometer-high',
+                        unique_id: '$deviceid-target_high_temp',
+                        state_topic: '$this/target_high_temp',
+                        command_topic: '$this/target_high_temp/set',
+                        name: 'High Temp',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    target_extra_dry: {
+                        platform: 'switch',
+                        icon: 'mdi:weather-sunny',
+                        unique_id: '$deviceid-target_extra_dry',
+                        state_topic: '$this/target_extra_dry',
+                        command_topic: '$this/target_extra_dry/set',
+                        name: 'Extra Dry',
+                        payload_on: 'ON',
+                        payload_off: 'OFF',
+                    },
+                    target_extra_rinse: {
+                        platform: 'select',
+                        icon: 'mdi:water-plus',
+                        unique_id: '$deviceid-target_extra_rinse',
+                        state_topic: '$this/target_extra_rinse',
+                        command_topic: '$this/target_extra_rinse/set',
+                        name: 'Extra Rinse',
+                        options: ['0', '1', '2', '3'],
+                    },
                     start_course: {
                         platform: 'button',
                         icon: 'mdi:play-circle',
                         unique_id: '$deviceid-start_course',
                         command_topic: '$this/start_course/set',
-                        name: 'Start Course (not yet functional)',
+                        name: 'Start Course',
+                        payload_press: 'PRESS',
+                    },
+                    pause_course: {
+                        platform: 'button',
+                        icon: 'mdi:pause-circle',
+                        unique_id: '$deviceid-pause_course',
+                        command_topic: '$this/pause_course/set',
+                        name: 'Pause Course',
+                        payload_press: 'PRESS',
+                    },
+                    resume_course: {
+                        platform: 'button',
+                        icon: 'mdi:play-pause',
+                        unique_id: '$deviceid-resume_course',
+                        command_topic: '$this/resume_course/set',
+                        name: 'Resume Course',
                         payload_press: 'PRESS',
                     },
                     cancel_course: {
@@ -350,7 +550,7 @@ export default class Device extends AABBDevice {
                         icon: 'mdi:stop-circle',
                         unique_id: '$deviceid-cancel_course',
                         command_topic: '$this/cancel_course/set',
-                        name: 'Cancel Course (not yet functional)',
+                        name: 'Cancel Course / Drain Stop',
                         payload_press: 'PRESS',
                     },
                     frame_kind: {
@@ -401,38 +601,169 @@ export default class Device extends AABBDevice {
     start() {
         super.start()
         this.publishProperty('target_course', COURSES[this.targetCourseId])
+        this.publishProperty('target_delay', this.targetDelay)
+        this.publishProperty('target_high_temp', this.targetHighTemp ? 'ON' : 'OFF')
+        this.publishProperty('target_extra_dry', this.targetExtraDry ? 'ON' : 'OFF')
+        this.publishProperty('target_extra_rinse', String(this.targetExtraRinse))
+    }
+
+    // The unit has no per-setting write: every settings command carries the full set, so this
+    // always sends the cached values (refreshed from each status record) with one field changed.
+    // Layout captured 2026-09-08, 28 frames, each one matched against the resulting status diff.
+    sendSettings() {
+        let opt1 = 0x00
+        if (this.cachedEndAlarmSound) opt1 |= 0x40 // verified
+        if (this.cachedAutoDry) opt1 |= 0x20 // matches status, not A/B tested on its own
+        if (this.cachedTimeIndicator) opt1 |= 0x10 // verified -- H11 has no bit here
+        if (this.cachedWashCompleteLight) opt1 |= 0x08 // ASSUMED from H11's clean_reminder bit
+        if (this.cachedBuzzerLevel === 'HIGH')
+            opt1 |= 0x04 // verified
+        else if (this.cachedBuzzerLevel === 'LOW') opt1 |= 0x02 // verified
+
+        // Only PERMANENT (0x80) was ever observed on this unit; the other two come from H11.
+        let opt2 = 0x00
+        if (this.cachedRemoteStartMode === 'OFF') opt2 = 0xc0
+        else if (this.cachedRemoteStartMode === 'PERMANENT') opt2 = 0x80
+        else if (this.cachedRemoteStartMode === 'ONE_TIME') opt2 = 0x40
+
+        let opt3 = 0x00
+        if (this.cachedBrightness) opt3 |= 0x40 // verified
+
+        this.send(
+            Buffer.from([
+                0xf0,
+                0x26,
+                this.cachedRinseLevel,
+                this.cachedSofteningLevel,
+                opt1,
+                opt2,
+                opt3,
+                0x00,
+                0x00,
+                0x00,
+            ]),
+        )
     }
 
     setProperty(prop: string, mqttValue: string) {
-        if (prop === 'target_course') {
-            // Staging only -- reflects the selection back to HA, does not send anything.
-            if (COURSE_NAME_TO_ID[mqttValue] !== undefined) {
-                this.targetCourseId = COURSE_NAME_TO_ID[mqttValue]
-                this.publishProperty('target_course', mqttValue)
+        switch (prop) {
+            // ---- direct commands (opcodes captured 2026-09-08, checksums verified) ----
+            case 'power':
+                this.send(Buffer.from(mqttValue === 'ON' ? 'F02616' : 'F02612', 'hex'))
+                return
+            case 'pause_course':
+                this.send(Buffer.from('F02613', 'hex'))
+                return
+            case 'resume_course':
+                this.send(Buffer.from('F02614', 'hex'))
+                return
+            case 'cancel_course':
+                this.send(Buffer.from('F02611', 'hex'))
+                return
+
+            // ---- staged course parameters (nothing is sent until start_course) ----
+            case 'target_course':
+                if (COURSE_NAME_TO_ID[mqttValue] !== undefined) {
+                    this.targetCourseId = COURSE_NAME_TO_ID[mqttValue]
+                    this.publishProperty('target_course', mqttValue)
+                }
+                return
+            case 'target_delay': {
+                const val = parseInt(mqttValue, 10)
+                if (!isNaN(val)) {
+                    this.targetDelay = val
+                    this.publishProperty('target_delay', val)
+                }
+                return
             }
-        } else if (
-            prop === 'start_course' ||
-            prop === 'cancel_course' ||
-            prop === 'rinse_level' ||
-            prop === 'softening_level' ||
-            prop === 'buzzer_level' ||
-            prop === 'end_alarm_sound' ||
-            prop === 'wash_complete_light' ||
-            prop === 'auto_dry' ||
-            prop === 'time_indicator' ||
-            prop === 'brightness'
-        ) {
-            // TODO: not implemented -- byte OFFSETS for these fields are confirmed (see class
-            // header, 2026-09-05 web-verified A/B test), but the RS485 WRITE encoding/checksum
-            // is not. Sending a guessed write command to a dishwasher (unlike a read) can
-            // trigger an unwanted physical action, so this is intentionally a no-op until the
-            // write protocol is independently confirmed from real captured commands.
-            console.warn(
-                `H07: refusing to send '${prop}' -- command encoding not yet implemented/verified (safety guard)`,
-            )
-            log('status', this.id, `H07: ignored '${prop}' request -- no command sent (unverified protocol)`)
-        } else {
-            console.warn(`H07: attempted to set '${prop}'='${mqttValue}', but no commands are implemented yet`)
+            case 'target_high_temp':
+                this.targetHighTemp = mqttValue === 'ON'
+                this.publishProperty('target_high_temp', mqttValue)
+                return
+            case 'target_extra_dry':
+                this.targetExtraDry = mqttValue === 'ON'
+                this.publishProperty('target_extra_dry', mqttValue)
+                return
+            case 'target_extra_rinse': {
+                const val = parseInt(mqttValue, 10)
+                if (!isNaN(val)) {
+                    this.targetExtraRinse = val
+                    this.publishProperty('target_extra_rinse', mqttValue)
+                }
+                return
+            }
+
+            // ---- F0 26 10 [Course][DelayHour][00][opt3][opt4][00] ----
+            case 'start_course': {
+                // opt3/opt4 bit meanings are taken from H11; on H07 only the resulting byte
+                // values were observed (0x84/0x0C/0x00 and 0x00/0x08/0x00), matching this
+                // decoding, but the individual bits were not A/B tested here.
+                let opt3 = 0x00
+                if (this.targetHighTemp) opt3 |= 0x08
+                if (this.targetExtraDry) opt3 |= 0x04
+                // H07 flags a downloaded cycle in opt3 bit 0x80, where H11 uses opt4 bit 0x40.
+                if (this.targetCourseId === 0x0b) opt3 |= 0x80
+
+                let opt4 = 0x00
+                if (this.targetExtraRinse === 1) opt4 |= 0x08
+                else if (this.targetExtraRinse === 2) opt4 |= 0x10
+                else if (this.targetExtraRinse === 3) opt4 |= 0x18
+
+                this.send(
+                    Buffer.from([0xf0, 0x26, 0x10, this.targetCourseId, this.targetDelay, 0x00, opt3, opt4, 0x00]),
+                )
+                return
+            }
+
+            // ---- settings (whole set re-sent each time) ----
+            case 'rinse_level': {
+                const val = parseInt(mqttValue, 10)
+                if (!isNaN(val)) {
+                    this.cachedRinseLevel = val
+                    this.sendSettings()
+                }
+                return
+            }
+            case 'softening_level': {
+                const val = parseInt(mqttValue, 10)
+                if (!isNaN(val)) {
+                    this.cachedSofteningLevel = val
+                    this.sendSettings()
+                }
+                return
+            }
+            case 'buzzer_level':
+                this.cachedBuzzerLevel = mqttValue
+                this.sendSettings()
+                return
+            case 'end_alarm_sound':
+                this.cachedEndAlarmSound = mqttValue === 'ON'
+                this.sendSettings()
+                return
+            case 'auto_dry':
+                this.cachedAutoDry = mqttValue === 'ON'
+                this.sendSettings()
+                return
+            case 'time_indicator':
+                this.cachedTimeIndicator = mqttValue === 'ON'
+                this.sendSettings()
+                return
+            case 'wash_complete_light':
+                this.cachedWashCompleteLight = mqttValue === 'ON'
+                this.sendSettings()
+                return
+            case 'brightness':
+                this.cachedBrightness = mqttValue === 'HIGH'
+                this.sendSettings()
+                return
+            case 'remote_start_mode':
+                this.cachedRemoteStartMode = mqttValue
+                this.sendSettings()
+                return
+
+            default:
+                console.warn(`H07: attempted to set unknown property '${prop}'='${mqttValue}'`)
+                log('status', this.id, `H07: ignored unknown property '${prop}'`)
         }
     }
 
@@ -497,38 +828,76 @@ export default class Device extends AABBDevice {
         // Everything below is relative to raw_status_record, i.e. rsr[i] === data[i + 2].
         const rsr = data.subarray(2)
 
-        // Door (rsr byte[11] bit 0x02) -- see class header: confirmed via one passively
-        // observed real transition + cross-model bit-position match with H11, not a
-        // deliberate A/B test (we do not open/close the door ourselves).
+        // Process (rsr byte[1]). Note a delay-started job reports State=RUNNING *and*
+        // Process=RESERVED -- the unit is only counting down, not washing yet.
+        const processCode = rsr[1]
+        this.publishProperty('process', PROCESSES[processCode] || `UNKNOWN(${processCode})`)
+
+        // Unlike H11, a cancel/drain (process 0x63) is NOT reported as powered off here: the
+        // unit really is still awake and draining, and flipping the switch off and back on a
+        // minute later is worse than leaving it on.
+        this.publishProperty('power', stateCode === 0 || stateCode === 4 ? 'OFF' : 'ON')
+
+        // Course (rsr byte[5]) with the downloaded course (rsr byte[20]) taking precedence,
+        // same convention as H11. Every course value ever observed (0x08/0x10/0x12) is a real
+        // modelJSON `Course` id, and 0x08/0x10 matched what was picked in the app.
+        const smartCourseCode = rsr[20]
+        const baseCourseCode = rsr[5]
+        const courseStr =
+            smartCourseCode !== 0
+                ? SMART_COURSES[smartCourseCode] || `DOWNLOAD_COURSE(${smartCourseCode})`
+                : COURSES[baseCourseCode] || `UNKNOWN(${baseCourseCode})`
+        this.publishProperty('course', courseStr)
+
+        // Initial / remaining / delay-start times, each an (hour, minute) pair.
+        this.publishProperty('course_time', rsr[3] * 60 + rsr[4])
+        this.publishProperty('remain_time', rsr[7] * 60 + rsr[8])
+        this.publishProperty('reserve_time', rsr[9] * 60 + rsr[10])
+
+        // Door (rsr byte[11] bit 0x02) -- confirmed 2026-09-08 against a deliberate sequence of
+        // door open/close events, and steady across every course run.
         this.publishProperty('door', (rsr[11] & 0x02) !== 0 ? 'OPEN' : 'CLOSE')
 
         // AutoSelect / auto dry option (rsr byte[11] bit 0x10)
-        this.publishProperty('auto_dry', (rsr[11] & 0x10) !== 0 ? 'ON' : 'OFF')
+        this.cachedAutoDry = (rsr[11] & 0x10) !== 0
+        this.publishProperty('auto_dry', this.cachedAutoDry ? 'ON' : 'OFF')
 
         // Wash-complete notification light (rsr byte[11] bit 0x40)
-        this.publishProperty('wash_complete_light', (rsr[11] & 0x40) !== 0 ? 'ON' : 'OFF')
+        this.cachedWashCompleteLight = (rsr[11] & 0x40) !== 0
+        this.publishProperty('wash_complete_light', this.cachedWashCompleteLight ? 'ON' : 'OFF')
 
         // RinseLevel (rsr byte[13], raw level number 0-4)
-        this.publishProperty('rinse_level', rsr[13])
+        this.cachedRinseLevel = rsr[13]
+        this.publishProperty('rinse_level', this.cachedRinseLevel)
 
         // SofteningLevel / water hardness (rsr byte[14], raw level number 0-4)
-        this.publishProperty('softening_level', rsr[14])
+        this.cachedSofteningLevel = rsr[14]
+        this.publishProperty('softening_level', this.cachedSofteningLevel)
 
         // BuzzerLevel (rsr byte[15], bit 0x80 = HIGH, bit 0x40 = LOW, neither = OFF)
-        let buzzerLevel: string
-        if ((rsr[15] & 0x80) !== 0) buzzerLevel = 'HIGH'
-        else if ((rsr[15] & 0x40) !== 0) buzzerLevel = 'LOW'
-        else buzzerLevel = 'OFF'
-        this.publishProperty('buzzer_level', buzzerLevel)
+        if ((rsr[15] & 0x80) !== 0) this.cachedBuzzerLevel = 'HIGH'
+        else if ((rsr[15] & 0x40) !== 0) this.cachedBuzzerLevel = 'LOW'
+        else this.cachedBuzzerLevel = 'OFF'
+        this.publishProperty('buzzer_level', this.cachedBuzzerLevel)
 
         // TimeIndicator / front display always-on clock (rsr byte[15] bit 0x08)
-        this.publishProperty('time_indicator', (rsr[15] & 0x08) !== 0 ? 'ON' : 'OFF')
+        this.cachedTimeIndicator = (rsr[15] & 0x08) !== 0
+        this.publishProperty('time_indicator', this.cachedTimeIndicator ? 'ON' : 'OFF')
 
         // EndAlarmSound (rsr byte[16] bit 0x04)
-        this.publishProperty('end_alarm_sound', (rsr[16] & 0x04) !== 0 ? 'ON' : 'OFF')
+        this.cachedEndAlarmSound = (rsr[16] & 0x04) !== 0
+        this.publishProperty('end_alarm_sound', this.cachedEndAlarmSound ? 'ON' : 'OFF')
+
+        // RemoteStartMode (rsr byte[16] bits 0xC0), same encoding as the command's opt2.
+        const remoteBits = rsr[16] & 0xc0
+        if (remoteBits === 0xc0) this.cachedRemoteStartMode = 'OFF'
+        else if (remoteBits === 0x80) this.cachedRemoteStartMode = 'PERMANENT'
+        else if (remoteBits === 0x40) this.cachedRemoteStartMode = 'ONE_TIME'
+        this.publishProperty('remote_start_mode', this.cachedRemoteStartMode)
 
         // Time display brightness (rsr byte[19] bit 0x40)
-        this.publishProperty('brightness', (rsr[19] & 0x40) !== 0 ? 'HIGH' : 'LOW')
+        this.cachedBrightness = (rsr[19] & 0x40) !== 0
+        this.publishProperty('brightness', this.cachedBrightness ? 'HIGH' : 'LOW')
 
         // Everything from byte[2] onward (including the State byte itself, for cross-checking)
         // is also published verbatim -- see class header for the fields that remain unmapped.
